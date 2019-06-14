@@ -132,6 +132,7 @@ public class TermFieldRewriter extends MySqlASTVisitorAdapter {
                     return true;
                 }
             }
+            // base change 2
 
             String keywordAlias = isBothTextAndKeyword(source);
             if (keywordAlias != null) {
