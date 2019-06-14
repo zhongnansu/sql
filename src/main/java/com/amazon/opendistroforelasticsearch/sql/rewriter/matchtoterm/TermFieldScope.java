@@ -39,7 +39,7 @@ public class TermFieldScope {
     public Map<String, String> getAliases() {
         return aliases;
     }
-
+    // test change 2
     public void setAliases(Map<String, String> aliases) {
         this.aliases = aliases;
     }
@@ -47,10 +47,11 @@ public class TermFieldScope {
     public IndexMappings getMapper() {
         return this.mapper;
     }
-
+    // test change 3
     public void setMapper(IndexMappings mapper) {
         this.mapper = mapper;
     }
+    // test change 4
 
     public FieldMappings getFinalMapping() {
         return this.finalMapping;
