@@ -117,7 +117,7 @@ public class TermFieldRewriter extends MySqlASTVisitorAdapter {
                 } else {
                     return true;
                 }
-
+// change 1
             } else if (this.filterType == TermRewriterFilter.JOIN) {
                 String[] arr = expr.getName().split("\\.", 2);
                 if (arr.length < 2)  throw new VerificationException("table alias or field name missing");
