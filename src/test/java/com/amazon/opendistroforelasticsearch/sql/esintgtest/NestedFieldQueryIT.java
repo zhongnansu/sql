@@ -16,28 +16,35 @@
 package com.amazon.opendistroforelasticsearch.sql.esintgtest;
 
 import org.elasticsearch.action.search.SearchResponse;
+import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.XContentType;
+import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.search.SearchHit;
 import org.hamcrest.BaseMatcher;
 import org.hamcrest.Description;
 import org.hamcrest.FeatureMatcher;
 import org.hamcrest.Matcher;
+import org.hamcrest.core.Is;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.Assert;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.function.Function;
 
+import static com.amazon.opendistroforelasticsearch.sql.util.MatcherUtils.hitAll;
+import static com.amazon.opendistroforelasticsearch.sql.util.MatcherUtils.kvString;
 import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.arrayContainingInAnyOrder;
 import static org.hamcrest.Matchers.closeTo;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 
@@ -61,11 +68,13 @@ import static org.hamcrest.Matchers.is;
  */
 public class NestedFieldQueryIT extends SQLIntegTestCase {
 
-    private static final String FROM = "FROM " + TestsConstants.TEST_INDEX_NESTED_TYPE + "/nestedType n, n.message m";
+    private static final String FROM = "FROM " + TestsConstants.TEST_INDEX_NESTED_TYPE + " n, n.message m";
+
 
     @Override
     protected void init() throws Exception {
         loadIndex(Index.NESTED);
+        loadIndex(Index.EMPLOYEE_NESTED);
     }
 
     @Test
@@ -257,6 +266,56 @@ public class NestedFieldQueryIT extends SQLIntegTestCase {
     }
 
     @Test
+    public void leftJoinSelectAll() throws IOException {
+        String sql = "SELECT * " +
+                     "FROM elasticsearch-sql_test_index_employee_nested e " +
+                     "LEFT JOIN e.projects p";
+        String explain = explainQuery(sql);
+        assertThat(explain, containsString("{\"bool\":{\"must_not\":[{\"nested\":{\"query\":" +
+            "{\"exists\":{\"field\":\"projects\",\"boost\":1.0}},\"path\":\"projects\""));
+
+        assertThat(explain, containsString("\"_source\":{\"includes\":[\"projects.*\""));
+
+        JSONObject results = executeQuery(sql);
+        Assert.assertThat(getTotalHits(results), equalTo(4));
+    }
+
+    @Test
+    public void leftJoinSpecificFields() throws IOException {
+        String sql = "SELECT e.name, p.name, p.started_year " +
+                     "FROM elasticsearch-sql_test_index_employee_nested e " +
+                     "LEFT JOIN e.projects p";
+        String explain = explainQuery(sql);
+        assertThat(explain, containsString("{\"bool\":{\"must_not\":[{\"nested\":{\"query\":" +
+            "{\"exists\":{\"field\":\"projects\",\"boost\":1.0}},\"path\":\"projects\""));
+        assertThat(explain, containsString("\"_source\":{\"includes\":[\"name\"],"));
+        assertThat(explain, containsString("\"_source\":{\"includes\":[\"projects.name\",\"projects.started_year\"]"));
+
+        JSONObject results = executeQuery(sql);
+        Assert.assertThat(getTotalHits(results), equalTo(4));
+    }
+
+    @Ignore("Comma join in left join won't pass syntax check in new ANTLR parser. "
+        + "Ignore for now and require to change grammar too when we want to support this case.")
+    @Test
+    public void leftJoinExceptionOnExtraNestedFields() throws IOException {
+        String sql = "SELECT * " +
+                     "FROM elasticsearch-sql_test_index_employee_nested e " +
+                     "LEFT JOIN e.projects p, e.comments c";
+
+        try {
+            String explain = explainQuery(sql);
+            Assert.fail("Expected ResponseException, but none was thrown");
+        } catch (ResponseException e) {
+            assertThat(e.getResponse().getStatusLine().getStatusCode(), equalTo(RestStatus.BAD_REQUEST.getStatus()));
+            final String entity = TestUtils.getResponseBody(e.getResponse());
+            assertThat(entity, containsString("only single nested field is allowed as right table for LEFT JOIN"));
+            assertThat(entity, containsString("\"type\":\"verification_exception\""));
+        }
+    }
+
+
+    @Test
     public void aggregationWithoutGroupBy() throws IOException {
         String sql = "SELECT AVG(m.dayOfWeek) AS avgDay " + FROM;
 
@@ -302,6 +361,21 @@ public class NestedFieldQueryIT extends SQLIntegTestCase {
         Assert.assertThat((Double) msgInfoBuckets.query("/1/message.dayOfWeek@NESTED/sumDay/value"), closeTo(10.0, 0.01));
     }
 
+    @Test
+    public void nestedFiledIsNotNull() throws IOException {
+        String sql = "SELECT e.name " +
+                "FROM elasticsearch-sql_test_index_employee_nested as e, e.projects as p " +
+                "WHERE p IS NOT NULL";
+
+        assertThat(
+                executeQuery(sql),
+                hitAll(
+                        kvString("/_source/name", Is.is("Bob Smith")),
+                        kvString("/_source/name", Is.is("Jane Smith"))
+                )
+        );
+    }
+
     // Doesn't support: aggregate function other than COUNT()
     @SuppressWarnings("unused")
     public void groupByNestedFieldAndAvg() throws IOException {
@@ -343,6 +417,378 @@ public class NestedFieldQueryIT extends SQLIntegTestCase {
         Assert.assertThat(innerBuckets.query("/1/COUNT(*)/value"), equalTo(1));
     }
 
+    @Test
+    public void countAggWithoutWhere() throws IOException {
+        String sql = "SELECT e.name, COUNT(p) as c " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "GROUP BY e.name " +
+                     "HAVING c > 1";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/c/value"), equalTo(3));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/c/value"), equalTo(2));
+    }
+
+    @Test
+    public void countAggWithWhereOnParent() throws IOException {
+        String sql = "SELECT e.name, COUNT(p) as c " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE e.name like '%smith%' " +
+                     "GROUP BY e.name " +
+                     "HAVING c > 1";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/c/value"), equalTo(3));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/c/value"), equalTo(2));
+    }
+
+    @Test
+    public void countAggWithWhereOnNested() throws IOException {
+        String sql = "SELECT e.name, COUNT(p) as c " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING c > 1";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/projects@FILTER/c/value"), equalTo(2));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/projects@FILTER/c/value"), equalTo(2));
+    }
+
+    @Test
+    public void countAggWithWhereOnParentOrNested() throws IOException {
+        String sql = "SELECT e.name, COUNT(p) as c " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE e.name like '%smith%' or p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING c > 1";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/c/value"), equalTo(3));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/c/value"), equalTo(2));
+    }
+
+    @Test
+    public void countAggWithWhereOnParentAndNested() throws IOException {
+        String sql = "SELECT e.name, COUNT(p) as c " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE e.name like '%smith%' AND p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING c > 1";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/projects@FILTER/c/value"), equalTo(2));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/projects@FILTER/c/value"), equalTo(2));
+    }
+
+    @Test
+    public void countAggWithWhereOnNestedAndNested() throws IOException {
+        String sql = "SELECT e.name, COUNT(p) as c " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE p.started_year > 2000 AND p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING c > 0";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/projects@FILTER/c/value"), equalTo(1));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/projects@FILTER/c/value"), equalTo(1));
+    }
+
+    @Test
+    public void countAggWithWhereOnNestedOrNested() throws IOException {
+        String sql = "SELECT e.name, COUNT(p) as c " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE p.started_year > 2000 OR p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING c > 1";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/projects@FILTER/c/value"), equalTo(2));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/projects@FILTER/c/value"), equalTo(2));
+    }
+
+    @Test
+    public void countAggOnNestedInnerFieldWithoutWhere() throws IOException {
+        String sql = "SELECT e.name, COUNT(p.started_year) as count " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING count > 0";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(
+                bucket.query("/0/projects.started_year@NESTED/projects.started_year@FILTER/count/value"),
+                equalTo(2));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(
+                bucket.query("/1/projects.started_year@NESTED/projects.started_year@FILTER/count/value"),
+                equalTo(2));
+    }
+
+    @Test
+    public void maxAggOnNestedInnerFieldWithoutWhere() throws IOException {
+        String sql = "SELECT e.name, MAX(p.started_year) as max " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE p.name LIKE '%security%' " +
+                     "GROUP BY e.name";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(
+                bucket.query("/0/projects.started_year@NESTED/projects.started_year@FILTER/max/value"),
+                equalTo(2015.0));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(
+                bucket.query("/1/projects.started_year@NESTED/projects.started_year@FILTER/max/value"),
+                equalTo(2015.0));
+    }
+
+    @Test
+    public void havingCountAggWithoutWhere() throws IOException {
+        String sql = "SELECT e.name " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "GROUP BY e.name " +
+                     "HAVING COUNT(p) > 1";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/count_0/value"), equalTo(3));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/count_0/value"), equalTo(2));
+    }
+
+    @Test
+    public void havingCountAggWithWhereOnParent() throws IOException {
+        String sql = "SELECT e.name " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE e.name like '%smith%' " +
+                     "GROUP BY e.name " +
+                     "HAVING COUNT(p) > 1";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/count_0/value"), equalTo(3));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/count_0/value"), equalTo(2));
+    }
+
+    @Test
+    public void havingCountAggWithWhereOnNested() throws IOException {
+        String sql = "SELECT e.name " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING COUNT(p) > 1";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/projects@FILTER/count_0/value"), equalTo(2));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/projects@FILTER/count_0/value"), equalTo(2));
+    }
+
+    @Test
+    public void havingCountAggWithWhereOnParentOrNested() throws IOException {
+        String sql = "SELECT e.name " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE e.name like '%smith%' or p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING COUNT(p) > 1";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/count_0/value"), equalTo(3));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/count_0/value"), equalTo(2));
+    }
+
+    @Test
+    public void havingCountAggWithWhereOnParentAndNested() throws IOException {
+        String sql = "SELECT e.name " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE e.name like '%smith%' AND p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING COUNT(p) > 1";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/projects@FILTER/count_0/value"), equalTo(2));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/projects@FILTER/count_0/value"), equalTo(2));
+    }
+
+    @Test
+    public void havingCountAggWithWhereOnNestedAndNested() throws IOException {
+        String sql = "SELECT e.name " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE p.started_year > 2000 AND p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING COUNT(p) > 0";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/projects@FILTER/count_0/value"), equalTo(1));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/projects@FILTER/count_0/value"), equalTo(1));
+    }
+
+    @Test
+    public void havingCountAggWithWhereOnNestedOrNested() throws IOException {
+        String sql = "SELECT e.name " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE p.started_year > 2000 OR p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING COUNT(p) > 1";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(bucket.query("/0/projects@NESTED/projects@FILTER/count_0/value"), equalTo(2));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(bucket.query("/1/projects@NESTED/projects@FILTER/count_0/value"), equalTo(2));
+    }
+
+    @Test
+    public void havingCountAggOnNestedInnerFieldWithoutWhere() throws IOException {
+        String sql = "SELECT e.name " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING COUNT(p.started_year) > 0";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(
+                bucket.query("/0/projects.started_year@NESTED/projects.started_year@FILTER/count_0/value"),
+                equalTo(2));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(
+                bucket.query("/1/projects.started_year@NESTED/projects.started_year@FILTER/count_0/value"),
+                equalTo(2));
+    }
+
+    @Test
+    public void havingMaxAggOnNestedInnerFieldWithoutWhere() throws IOException {
+        String sql = "SELECT e.name " +
+                     "FROM elasticsearch-sql_test_index_employee_nested AS e, e.projects AS p " +
+                     "WHERE p.name LIKE '%security%' " +
+                     "GROUP BY e.name " +
+                     "HAVING MAX(p.started_year) > 1990";
+
+        JSONObject result = executeQuery(sql);
+        JSONObject aggregation = getAggregation(result, "name.keyword");
+        JSONArray bucket = (JSONArray) aggregation.optQuery("/buckets");
+
+        Assert.assertNotNull(bucket);
+        Assert.assertThat(bucket.length(), equalTo(2));
+        Assert.assertThat(bucket.query("/0/key"), equalTo("Bob Smith"));
+        Assert.assertThat(
+                bucket.query("/0/projects.started_year@NESTED/projects.started_year@FILTER/max_0/value"),
+                equalTo(2015.0));
+        Assert.assertThat(bucket.query("/1/key"), equalTo("Jane Smith"));
+        Assert.assertThat(
+                bucket.query("/1/projects.started_year@NESTED/projects.started_year@FILTER/max_0/value"),
+                equalTo(2015.0));
+    }
 
     /***********************************************************
                 Matchers for Non-Aggregation Testing

@@ -41,11 +41,13 @@ import static org.elasticsearch.rest.RestStatus.SERVICE_UNAVAILABLE;
 public class RestSqlStatsAction extends BaseRestHandler {
     private static final Logger LOG = LogManager.getLogger(RestSqlStatsAction.class);
 
-    /** API endpoint path */
+    /**
+     * API endpoint path
+     */
     public static final String STATS_API_ENDPOINT = "/_opendistro/_sql/stats";
 
     public RestSqlStatsAction(Settings settings, RestController restController) {
-        super(settings);
+        super();
         restController.registerHandler(RestRequest.Method.POST, STATS_API_ENDPOINT, this);
         restController.registerHandler(RestRequest.Method.GET, STATS_API_ENDPOINT, this);
     }
@@ -61,7 +63,8 @@ public class RestSqlStatsAction extends BaseRestHandler {
         LogUtils.addRequestId();
 
         try {
-            return channel -> channel.sendResponse(new BytesRestResponse(RestStatus.OK, Metrics.getInstance().collectToJSON()));
+            return channel -> channel.sendResponse(new BytesRestResponse(RestStatus.OK,
+                    Metrics.getInstance().collectToJSON()));
         } catch (Exception e) {
             LOG.error("Failed during Query SQL STATS Action.", e);
 

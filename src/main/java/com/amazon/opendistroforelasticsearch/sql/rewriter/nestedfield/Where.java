@@ -17,6 +17,7 @@ package com.amazon.opendistroforelasticsearch.sql.rewriter.nestedfield;
 
 import com.alibaba.druid.sql.ast.expr.SQLBinaryOpExpr;
 import com.alibaba.druid.sql.ast.expr.SQLCharExpr;
+import com.alibaba.druid.sql.ast.expr.SQLNotExpr;
 import com.alibaba.druid.sql.dialect.mysql.ast.statement.MySqlSelectQueryBlock;
 
 /**
@@ -31,10 +32,10 @@ class Where extends SQLClause<SQLBinaryOpExpr> {
     /**
      * Rewrite if left and right tag is different (or reach root of WHERE).
      * Otherwise continue delaying the rewrite.
-     *
+     * <p>
      * Assumption: there are only 2 forms of condition
-     *              1) BinaryOp: Left=Identifier, right=value
-     *              2) BinaryOp: Left=BinaryOp, right=BinaryOp
+     * 1) BinaryOp: Left=Identifier, right=value
+     * 2) BinaryOp: Left=BinaryOp, right=BinaryOp
      */
     @Override
     void rewrite(Scope scope) {
@@ -46,7 +47,7 @@ class Where extends SQLClause<SQLBinaryOpExpr> {
                 right().mergeNestedField(scope);
             }
         }
-        mergeIfHaveTagAndIsRootOfWhere(scope);
+        mergeIfHaveTagAndIsRootOfWhereOrNot(scope);
     }
 
     private boolean isLeftChildCondition() {
@@ -63,10 +64,15 @@ class Where extends SQLClause<SQLBinaryOpExpr> {
         scope.addConditionTag(expr, scope.getConditionTag((SQLBinaryOpExpr) expr.getLeft()));
     }
 
-    /** Merge anyway if the root of WHERE clause be reached */
-    private void mergeIfHaveTagAndIsRootOfWhere(Scope scope) {
-        if (!scope.getConditionTag(expr).isEmpty() &&
-                expr.getParent() instanceof MySqlSelectQueryBlock) {
+    /**
+     * Merge anyway if the root of WHERE clause or {@link SQLNotExpr} be reached.
+     */
+    private void mergeIfHaveTagAndIsRootOfWhereOrNot(Scope scope) {
+        if (scope.getConditionTag(expr).isEmpty()) {
+            return;
+        }
+        if (expr.getParent() instanceof MySqlSelectQueryBlock
+            || expr.getParent() instanceof SQLNotExpr) {
             mergeNestedField(scope);
         }
     }
@@ -81,39 +87,39 @@ class Where extends SQLClause<SQLBinaryOpExpr> {
 
     /**
      * There are 2 cases:
-     *  1) For a single condition, just wrap nested() function. That's it.
-     *
-     *              BinaryOp
-     *              /       \
-     *     Identifier       Value
-     *  "employees.age"      "30"
-     *
-     *                to
-     *
-     *              BinaryOp
-     *              /       \
-     *         Method       Value
-     *        "nested"       "30"
-     *          |
-     *     Identifier
-     *  "employees.age"
-     *
-     *  2) For multiple conditions, put entire BinaryOp to the parameter and add function name "nested()" first
-     *
-     *              BinaryOp (a)
-     *             /       \
-     *         BinaryOp   BinaryOp
-     *            |         |
-     *           ...       ...
-     *
-     *                 to
-     *
-     *               Method
-     *              "nested"
-     *                 |
-     *               BinaryOp (a)
-     *               /      \
-     *              ...    ...
+     * 1) For a single condition, just wrap nested() function. That's it.
+     * <p>
+     * BinaryOp
+     * /       \
+     * Identifier       Value
+     * "employees.age"      "30"
+     * <p>
+     * to
+     * <p>
+     * BinaryOp
+     * /       \
+     * Method       Value
+     * "nested"       "30"
+     * |
+     * Identifier
+     * "employees.age"
+     * <p>
+     * 2) For multiple conditions, put entire BinaryOp to the parameter and add function name "nested()" first
+     * <p>
+     * BinaryOp (a)
+     * /       \
+     * BinaryOp   BinaryOp
+     * |         |
+     * ...       ...
+     * <p>
+     * to
+     * <p>
+     * Method
+     * "nested"
+     * |
+     * BinaryOp (a)
+     * /      \
+     * ...    ...
      */
     private void mergeNestedField(Scope scope) {
         String tag = scope.getConditionTag(expr);
@@ -121,7 +127,7 @@ class Where extends SQLClause<SQLBinaryOpExpr> {
             if (isLeftChildCondition()) {
                 replaceByNestedFunction(expr).getParameters().add(0, new SQLCharExpr(tag));
             } else {
-                replaceByNestedFunction(expr.getLeft());
+                replaceByNestedFunction(expr.getLeft(), pathFromIdentifier(expr.getLeft()));
             }
         }
     }

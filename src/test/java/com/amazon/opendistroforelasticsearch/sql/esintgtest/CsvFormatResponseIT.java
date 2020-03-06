@@ -19,8 +19,6 @@ import com.amazon.opendistroforelasticsearch.sql.executor.csv.CSVResult;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.RequestOptions;
 import org.elasticsearch.client.Response;
-import org.elasticsearch.client.RestClient;
-import org.elasticsearch.test.ESIntegTestCase;
 import org.hamcrest.Matcher;
 import org.hamcrest.core.AnyOf;
 import org.junit.Assert;
@@ -40,12 +38,14 @@ import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestsConstant
 import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestsConstants.TEST_INDEX_DOG;
 import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestsConstants.TEST_INDEX_GAME_OF_THRONES;
 import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestsConstants.TEST_INDEX_NESTED_TYPE;
+import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestsConstants.TEST_INDEX_NESTED_WITH_QUOTES;
 import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestsConstants.TEST_INDEX_ONLINE;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
-import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.core.StringStartsWith.startsWith;
 
@@ -60,6 +60,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
     protected void init() throws Exception {
         loadIndex(Index.ACCOUNT);
         loadIndex(Index.NESTED);
+        loadIndex(Index.NESTED_WITH_QUOTES);
         loadIndex(Index.DOG);
         loadIndex(Index.GAME_OF_THRONES);
         loadIndex(Index.ONLINE);
@@ -137,6 +138,22 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
     }
 
     @Test
+    public void doubleQuotesAreEscapedWithDoubleQuotes() throws IOException {
+        final String query = "SELECT * FROM " + TEST_INDEX_NESTED_WITH_QUOTES;
+
+        final CSVResult csvResult = executeCsvRequest(query, false);
+        final List<String> rows = csvResult.getLines();
+        Assert.assertThat(rows.size(), equalTo(2));
+
+        final String expectedValue1 = "\"[{dayOfWeek=6, author=z\"\"z, info=zz}]\"";
+        final String expectedValue2 = "\"[{dayOfWeek=3, author=this \"\"value\"\" contains quotes, info=rr}]\"";
+
+        for (String row : rows) {
+            Assert.assertThat(row, anyOf(containsString(expectedValue1), containsString(expectedValue2)));
+        }
+    }
+
+    @Test
     public void fieldOrder() throws IOException {
 
         final String[] expectedFields = {"age", "firstname", "address", "gender", "email"};
@@ -169,7 +186,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
 
     @Test
     public void simpleSearchResultNotNestedNotFlatNoAggs() throws Exception {
-        String query = String.format(Locale.ROOT, "select dog_name,age from %s/dog order by age", TEST_INDEX_DOG);
+        String query = String.format(Locale.ROOT, "select dog_name,age from %s order by age", TEST_INDEX_DOG);
         final CSVResult csvResult = executeCsvRequest(query, false);
 
         List<String> headers = csvResult.getHeaders();
@@ -185,7 +202,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
 
     @Test
     public void simpleSearchResultWithNestedNotFlatNoAggs() throws Exception {
-        String query = String.format(Locale.ROOT, "select name,house from %s/gotCharacters",
+        String query = String.format(Locale.ROOT, "select name,house from %s",
                 TEST_INDEX_GAME_OF_THRONES);
         CSVResult csvResult = executeCsvRequest(query, false);
 
@@ -210,7 +227,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
     @Ignore("headers incorrect in case of nested fields")
     @Test
     public void simpleSearchResultWithNestedOneFieldNotFlatNoAggs() throws Exception {
-        String query = String.format(Locale.ROOT, "select name.firstname,house from %s/gotCharacters",
+        String query = String.format(Locale.ROOT, "select name.firstname,house from %s",
                 TEST_INDEX_GAME_OF_THRONES);
         CSVResult csvResult = executeCsvRequest(query, false);
 
@@ -231,7 +248,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
     @Ignore("headers incorrect in case of nested fields")
     @Test
     public void simpleSearchResultWithNestedTwoFieldsFromSameNestedNotFlatNoAggs() throws Exception {
-        String query = String.format(Locale.ROOT, "select name.firstname,name.lastname,house from %s/gotCharacters",
+        String query = String.format(Locale.ROOT, "select name.firstname,name.lastname,house from %s",
                 TEST_INDEX_GAME_OF_THRONES);
         CSVResult csvResult = executeCsvRequest(query, false);
 
@@ -255,7 +272,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
 
     @Test
     public void simpleSearchResultWithNestedWithFlatNoAggs() throws Exception {
-        String query = String.format(Locale.ROOT, "select name.firstname,house from %s/gotCharacters",
+        String query = String.format(Locale.ROOT, "select name.firstname,house from %s",
                 TEST_INDEX_GAME_OF_THRONES);
         CSVResult csvResult = executeCsvRequest(query, true);
 
@@ -274,8 +291,8 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
 
     @Test
     public void joinSearchResultNotNestedNotFlatNoAggs() throws Exception {
-        String query = String.format(Locale.ROOT, "select c.gender , h.hname,h.words from %s/gotCharacters c " +
-                "JOIN %s/gotCharacters h " +
+        String query = String.format(Locale.ROOT, "select c.gender , h.hname,h.words from %s c " +
+                "JOIN %s h " +
                 "on h.hname = c.house ", TEST_INDEX_GAME_OF_THRONES, TEST_INDEX_GAME_OF_THRONES);
         CSVResult csvResult = executeCsvRequest(query, false);
 
@@ -293,7 +310,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
 
     @Test
     public void simpleNumericValueAgg() throws Exception {
-        String query = String.format(Locale.ROOT, "select count(*) from %s/dog ", TEST_INDEX_DOG);
+        String query = String.format(Locale.ROOT, "select count(*) from %s ", TEST_INDEX_DOG);
         CSVResult csvResult = executeCsvRequest(query, false);
 
         List<String> headers = csvResult.getHeaders();
@@ -309,7 +326,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
 
     @Test
     public void simpleNumericValueAggWithAlias() throws Exception {
-        String query = String.format(Locale.ROOT, "select avg(age) as myAlias from %s/dog ", TEST_INDEX_DOG);
+        String query = String.format(Locale.ROOT, "select avg(age) as myAlias from %s ", TEST_INDEX_DOG);
         CSVResult csvResult = executeCsvRequest(query, false);
 
         List<String> headers = csvResult.getHeaders();
@@ -325,7 +342,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
 
     @Test
     public void twoNumericAggWithAlias() throws Exception {
-        String query = String.format(Locale.ROOT, "select count(*) as count, avg(age) as myAlias from %s/dog ",
+        String query = String.format(Locale.ROOT, "select count(*) as count, avg(age) as myAlias from %s ",
                 TEST_INDEX_DOG);
         CSVResult csvResult = executeCsvRequest(query, false);
 
@@ -348,87 +365,76 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
 
     @Test
     public void aggAfterTermsGroupBy() throws Exception {
-        String query = String.format(Locale.ROOT, "SELECT COUNT(*) FROM %s/account GROUP BY gender",
+        String query = String.format(Locale.ROOT, "SELECT COUNT(*) FROM %s GROUP BY gender",
                 TEST_INDEX_ACCOUNT);
         CSVResult csvResult = executeCsvRequest(query, false);
         List<String> headers = csvResult.getHeaders();
-        Assert.assertEquals(2, headers.size());
-        Assert.assertEquals("gender", headers.get(0));
-        Assert.assertEquals("COUNT(*)", headers.get(1));
+        Assert.assertEquals(1, headers.size());
+        assertThat(headers, contains(equalTo("COUNT(*)")));
 
         List<String> lines = csvResult.getLines();
         Assert.assertEquals(2, lines.size());
-        Assert.assertTrue("m,507.0", lines.contains("m,507.0"));
-        Assert.assertTrue("f,493.0", lines.contains("f,493.0"));
-
+        assertThat(lines, containsInAnyOrder(equalTo("507.0"), equalTo("493.0")));
     }
 
     @Test
     public void aggAfterTwoTermsGroupBy() throws Exception {
         String query = String.format(Locale.ROOT,
-                "SELECT COUNT(*) FROM %s/account where age in (35,36) GROUP BY gender,age",
+                "SELECT COUNT(*) FROM %s where age in (35,36) GROUP BY gender,age",
                 TEST_INDEX_ACCOUNT);
         CSVResult csvResult = executeCsvRequest(query, false);
         List<String> headers = csvResult.getHeaders();
-        Assert.assertEquals(3, headers.size());
-        Assert.assertEquals("gender", headers.get(0));
-        Assert.assertEquals("age", headers.get(1));
-        Assert.assertEquals("COUNT(*)", headers.get(2));
+        Assert.assertEquals(1, headers.size());
+        assertThat(headers, contains(equalTo("COUNT(*)")));
 
         List<String> lines = csvResult.getLines();
         Assert.assertEquals(4, lines.size());
-        Assert.assertTrue("m,36,31.0", lines.contains("m,36,31.0"));
-        Assert.assertTrue("m,35,28.0", lines.contains("m,36,31.0"));
-        Assert.assertTrue("f,36,21.0", lines.contains("f,36,21.0"));
-        Assert.assertTrue("f,35,24.0", lines.contains("f,35,24.0"));
-
+        assertThat(lines, containsInAnyOrder(
+                equalTo("31.0"),
+                equalTo("28.0"),
+                equalTo("21.0"),
+                equalTo("24.0")));
     }
 
     @Test
     public void multipleAggAfterTwoTermsGroupBy() throws Exception {
         String query = String.format(Locale.ROOT,
-                "SELECT COUNT(*) , sum(balance) FROM %s/account where age in (35,36) GROUP BY gender,age",
+                "SELECT COUNT(*) , sum(balance) FROM %s where age in (35,36) GROUP BY gender,age",
                 TEST_INDEX_ACCOUNT);
         CSVResult csvResult = executeCsvRequest(query, false);
         List<String> headers = csvResult.getHeaders();
-        Assert.assertEquals(4, headers.size());
-        Assert.assertEquals("gender", headers.get(0));
-        Assert.assertEquals("age", headers.get(1));
-        Assert.assertTrue(headers.get(2).equals("COUNT(*)") || headers.get(2).equals("SUM(balance)"));
-        Assert.assertTrue(headers.get(3).equals("COUNT(*)") || headers.get(3).equals("SUM(balance)"));
+        Assert.assertEquals(2, headers.size());
+        assertThat(headers, contains(equalTo("COUNT(*)"), equalTo("SUM(balance)")));
 
         List<String> lines = csvResult.getLines();
         Assert.assertEquals(4, lines.size());
-        Assert.assertTrue("m,36,31.0,647425.0",
-                lines.contains("m,36,31.0,647425.0") || lines.contains("m,36,647425.0,31.0"));
-        Assert.assertTrue("m,35,28.0,678337.0",
-                lines.contains("m,35,28.0,678337.0") || lines.contains("m,35,678337.0,28.0"));
-        Assert.assertTrue("f,36,21.0,505660.0",
-                lines.contains("f,36,21.0,505660.0") || lines.contains("f,36,505660.0,21.0"));
-        Assert.assertTrue("f,35,24.0,472771.0",
-                lines.contains("f,35,24.0,472771.0") || lines.contains("f,35,472771.0,24.0"));
-
+        assertThat(lines, containsInAnyOrder(
+                equalTo("31.0,647425.0"),
+                equalTo("28.0,678337.0"),
+                equalTo("21.0,505660.0"),
+                equalTo("24.0,472771.0")));
     }
 
     @Test
     public void dateHistogramTest() throws Exception {
-        String query = String.format(Locale.ROOT, "select count(*) from %s/online" +
-                " group by date_histogram('field'='insert_time','interval'='4d','alias'='days')", TEST_INDEX_ONLINE);
+        String query = String.format(Locale.ROOT, "select count(*) from %s" +
+                " group by date_histogram('field'='insert_time','fixed_interval'='4d','alias'='days')", TEST_INDEX_ONLINE);
         CSVResult csvResult = executeCsvRequest(query, false);
         List<String> headers = csvResult.getHeaders();
-        Assert.assertEquals(2, headers.size());
-        Assert.assertEquals("days", headers.get(0));
-        Assert.assertEquals("COUNT(*)", headers.get(1));
+        Assert.assertEquals(1, headers.size());
+        assertThat(headers, contains(equalTo("COUNT(*)")));
 
         List<String> lines = csvResult.getLines();
         Assert.assertEquals(3, lines.size());
-        Assert.assertThat(lines,
-                hasItems("2014-08-14 00:00:00,477.0", "2014-08-18 00:00:00,5664.0", "2014-08-22 00:00:00,3795.0"));
+        assertThat(lines, containsInAnyOrder(
+                equalTo("477.0"),
+                equalTo("5664.0"),
+                equalTo("3795.0")));
     }
 
     @Test
     public void statsAggregationTest() throws Exception {
-        String query = String.format(Locale.ROOT, "SELECT STATS(age) FROM %s/account", TEST_INDEX_ACCOUNT);
+        String query = String.format(Locale.ROOT, "SELECT STATS(age) FROM %s", TEST_INDEX_ACCOUNT);
         CSVResult csvResult = executeCsvRequest(query, false);
         List<String> headers = csvResult.getHeaders();
         Assert.assertEquals(5, headers.size());
@@ -445,11 +451,11 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
 
     @Test
     public void extendedStatsAggregationTest() throws Exception {
-        String query = String.format(Locale.ROOT, "SELECT EXTENDED_STATS(age) FROM %s/account", TEST_INDEX_ACCOUNT);
+        String query = String.format(Locale.ROOT, "SELECT EXTENDED_STATS(age) FROM %s", TEST_INDEX_ACCOUNT);
         CSVResult csvResult = executeCsvRequest(query, false);
         List<String> headers = csvResult.getHeaders();
 
-        final String expectedHeaders[] = {"EXTENDED_STATS(age).count", "EXTENDED_STATS(age).sum",
+        final String[] expectedHeaders = {"EXTENDED_STATS(age).count", "EXTENDED_STATS(age).sum",
                 "EXTENDED_STATS(age).avg", "EXTENDED_STATS(age).min", "EXTENDED_STATS(age).max",
                 "EXTENDED_STATS(age).sumOfSquares", "EXTENDED_STATS(age).variance", "EXTENDED_STATS(age).stdDeviation"};
 
@@ -466,7 +472,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
 
     @Test
     public void percentileAggregationTest() throws Exception {
-        String query = String.format(Locale.ROOT, "select percentiles(age) as per from %s/account where age > 31",
+        String query = String.format(Locale.ROOT, "select percentiles(age) as per from %s where age > 31",
                 TEST_INDEX_ACCOUNT);
         CSVResult csvResult = executeCsvRequest(query, false);
         List<String> headers = csvResult.getHeaders();
@@ -487,7 +493,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
 
     @Test
     public void includeTypeAndNotScore() throws Exception {
-        String query = String.format(Locale.ROOT, "select age , firstname from %s/account where age > 31 limit 2",
+        String query = String.format(Locale.ROOT, "select age , firstname from %s where age > 31 limit 2",
                 TEST_INDEX_ACCOUNT);
         CSVResult csvResult = executeCsvRequest(query, false, false, true, false);
         List<String> headers = csvResult.getHeaders();
@@ -496,14 +502,14 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
         Assert.assertTrue(headers.contains("firstname"));
         Assert.assertTrue(headers.contains("_type"));
         List<String> lines = csvResult.getLines();
-        Assert.assertTrue(lines.get(0).contains(",account") || lines.get(0).contains("account,"));
-        Assert.assertTrue(lines.get(1).contains(",account") || lines.get(1).contains("account,"));
+        Assert.assertTrue(lines.get(0).contains(",_doc") || lines.get(0).contains("_doc,"));
+        Assert.assertTrue(lines.get(1).contains(",_doc") || lines.get(1).contains("_doc,"));
     }
 
     @Test
     public void includeScoreAndNotType() throws Exception {
         String query = String.format(Locale.ROOT,
-                "select age , firstname from %s/account where age > 31 order by _score desc limit 2 ",
+                "select age , firstname from %s where age > 31 order by _score desc limit 2 ",
                 TEST_INDEX_ACCOUNT);
         CSVResult csvResult = executeCsvRequest(query, false, true, false, false);
         List<String> headers = csvResult.getHeaders();
@@ -519,7 +525,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
     @Test
     public void includeScoreAndType() throws Exception {
         String query = String.format(Locale.ROOT,
-                "select age , firstname from %s/account where age > 31 order by _score desc limit 2 ",
+                "select age , firstname from %s where age > 31 order by _score desc limit 2 ",
                 TEST_INDEX_ACCOUNT);
         CSVResult csvResult = executeCsvRequest(query, false, true, true, false);
         List<String> headers = csvResult.getHeaders();
@@ -530,8 +536,8 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
         Assert.assertTrue(headers.contains("_type"));
         List<String> lines = csvResult.getLines();
         String firstLine = lines.get(0);
-        Assert.assertTrue(firstLine.contains("account,1.0") || firstLine.contains("1.0,account"));
-        Assert.assertTrue(lines.get(1).contains("account,1.0") || lines.get(1).contains("1.0,account"));
+        Assert.assertTrue(firstLine.contains("_doc,1.0") || firstLine.contains("1.0,_doc"));
+        Assert.assertTrue(lines.get(1).contains("_doc,1.0") || lines.get(1).contains("1.0,_doc"));
     }
 
     /* todo: more tests:
@@ -543,7 +549,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
     @Test
     public void scriptedField() throws Exception {
         String query = String.format(Locale.ROOT,
-                "select age+1 as agePlusOne ,age , firstname from %s/account where age =  31 limit 1",
+                "select age+1 as agePlusOne ,age , firstname from %s where age =  31 limit 1",
                 TEST_INDEX_ACCOUNT);
         CSVResult csvResult = executeCsvRequest(query, false);
         List<String> headers = csvResult.getHeaders();
@@ -559,7 +565,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
     @Ignore("separator not exposed")
     @Test
     public void twoCharsSeperator() throws Exception {
-        String query = String.format(Locale.ROOT, "select dog_name,age from %s/dog order by age", TEST_INDEX_DOG);
+        String query = String.format(Locale.ROOT, "select dog_name,age from %s order by age", TEST_INDEX_DOG);
         CSVResult csvResult = executeCsvRequest(query, false);
 
         List<String> headers = csvResult.getHeaders();
@@ -577,7 +583,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
     @Test
     public void includeIdAndNotTypeOrScore() throws Exception {
         String query = String.format(Locale.ROOT,
-                "select age , firstname from %s/account where lastname = 'Marquez' ", TEST_INDEX_ACCOUNT);
+                "select age , firstname from %s where lastname = 'Marquez' ", TEST_INDEX_ACCOUNT);
         CSVResult csvResult = executeCsvRequest(query, false, false, false, true);
         List<String> headers = csvResult.getHeaders();
         Assert.assertEquals(3, headers.size());
@@ -591,7 +597,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
     @Test
     public void includeIdAndTypeButNoScore() throws Exception {
         String query = String.format(Locale.ROOT,
-                "select age , firstname from %s/account where lastname = 'Marquez' ", TEST_INDEX_ACCOUNT);
+                "select age , firstname from %s where lastname = 'Marquez' ", TEST_INDEX_ACCOUNT);
         CSVResult csvResult = executeCsvRequest(query, false, false, true, true);
         List<String> headers = csvResult.getHeaders();
         Assert.assertEquals(4, headers.size());
@@ -600,7 +606,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
         Assert.assertTrue(headers.contains("_id"));
         Assert.assertTrue(headers.contains("_type"));
         List<String> lines = csvResult.getLines();
-        Assert.assertTrue(lines.get(0).contains("account,437") || lines.get(0).contains("437,account"));
+        Assert.assertTrue(lines.get(0).contains("_doc,437") || lines.get(0).contains("437,_doc"));
     }
     //endregion Tests migrated from CSVResultsExtractorTests
 
@@ -644,8 +650,7 @@ public class CsvFormatResponseIT extends SQLIntegTestCase {
         restOptionsBuilder.addHeader("Content-Type", "application/json");
         sqlRequest.setOptions(restOptionsBuilder);
 
-        final RestClient restClient = ESIntegTestCase.getRestClient();
-        final Response response = restClient.performRequest(sqlRequest);
+        final Response response = client().performRequest(sqlRequest);
         Assert.assertEquals(200, response.getStatusLine().getStatusCode());
         final String responseString = TestUtils.getResponseBody(response, true);
 

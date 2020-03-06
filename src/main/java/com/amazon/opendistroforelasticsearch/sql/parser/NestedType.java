@@ -21,6 +21,8 @@ import com.alibaba.druid.sql.ast.expr.SQLMethodInvokeExpr;
 import com.alibaba.druid.sql.ast.expr.SQLPropertyExpr;
 import com.alibaba.druid.sql.ast.expr.SQLTextLiteralExpr;
 import com.amazon.opendistroforelasticsearch.sql.domain.Where;
+import com.amazon.opendistroforelasticsearch.sql.domain.bucketpath.BucketPath;
+import com.amazon.opendistroforelasticsearch.sql.domain.bucketpath.Path;
 import com.amazon.opendistroforelasticsearch.sql.exception.SqlParseException;
 import com.amazon.opendistroforelasticsearch.sql.utils.Util;
 
@@ -35,27 +37,34 @@ public class NestedType {
     public Where where;
     private boolean reverse;
     private boolean simple;
+    private final BucketPath bucketPath = new BucketPath();
 
     public boolean tryFillFromExpr(SQLExpr expr) throws SqlParseException {
-        if (!(expr instanceof SQLMethodInvokeExpr)) return false;
+        if (!(expr instanceof SQLMethodInvokeExpr)) {
+            return false;
+        }
         SQLMethodInvokeExpr method = (SQLMethodInvokeExpr) expr;
         String methodNameLower = method.getMethodName().toLowerCase();
-        if (!(methodNameLower.equals("nested") || methodNameLower.equals("reverse_nested"))) return false;
+        if (!(methodNameLower.equals("nested") || methodNameLower.equals("reverse_nested"))) {
+            return false;
+        }
 
         reverse = methodNameLower.equals("reverse_nested");
 
         List<SQLExpr> parameters = method.getParameters();
-        if (parameters.size() != 2 && parameters.size() != 1)
-            throw new SqlParseException("on nested object only allowed 2 parameters (field,path)/(path,conditions..) or 1 parameter (field) ");
+        if (parameters.size() != 2 && parameters.size() != 1) {
+            throw new SqlParseException("on nested object only allowed 2 parameters (field,path)/(path,conditions..) "
+                    + "or 1 parameter (field) ");
+        }
 
         String field = Util.extendedToString(parameters.get(0));
         this.field = field;
         if (parameters.size() == 1) {
             //calc path myself..
             if (!field.contains(".")) {
-                if (!reverse)
+                if (!reverse) {
                     throw new SqlParseException("nested should contain . on their field name");
-                else {
+                } else {
                     this.path = null;
                     this.simple = true;
                 }
@@ -68,21 +77,23 @@ public class NestedType {
 
         } else if (parameters.size() == 2) {
             SQLExpr secondParameter = parameters.get(1);
-            if(secondParameter instanceof SQLTextLiteralExpr || secondParameter instanceof SQLIdentifierExpr || secondParameter instanceof SQLPropertyExpr) {
+            if (secondParameter instanceof SQLTextLiteralExpr || secondParameter instanceof SQLIdentifierExpr
+                    || secondParameter instanceof SQLPropertyExpr) {
 
                 String pathString = Util.extendedToString(secondParameter);
-                if(pathString.equals(""))
+                if (pathString.equals("")) {
                     this.path = null;
-                else
+                } else {
                     this.path = pathString;
+                }
                 this.simple = true;
-            }
-            else {
+            } else {
                 this.path = field;
                 Where where = Where.newInstance();
-                new WhereParser(new SqlParser()).parseWhere(secondParameter,where);
-                if(where.getWheres().size() == 0)
+                new WhereParser(new SqlParser()).parseWhere(secondParameter, where);
+                if (where.getWheres().size() == 0) {
                     throw new SqlParseException("unable to parse filter where.");
+                }
                 this.where = where;
                 simple = false;
             }
@@ -97,5 +108,48 @@ public class NestedType {
 
     public boolean isReverse() {
         return reverse;
+    }
+
+    /**
+     * Return the name of the Nested Aggregation.
+     */
+    public String getNestedAggName() {
+        return field + "@NESTED";
+    }
+
+    /**
+     * Return the name of the Filter Aggregation
+     */
+    public String getFilterAggName() {
+        return field + "@FILTER";
+    }
+
+    public void addBucketPath(Path path) {
+        bucketPath.add(path);
+    }
+
+    public String getBucketPath() {
+        return bucketPath.getBucketPath();
+    }
+
+    /**
+     * Return true if the filed is the nested filed.
+     * For example, the mapping
+     * {
+     * "projects":{
+     * "type": "nested"
+     * "properties": {
+     * "name": {
+     * "type": "text"
+     * }
+     * }
+     * }
+     * }
+     * <p>
+     * If the filed is projects, return true.
+     * If the filed is projects.name, return false.
+     */
+    public boolean isNestedField() {
+        return !field.contains(".") && field.equalsIgnoreCase(path);
     }
 }

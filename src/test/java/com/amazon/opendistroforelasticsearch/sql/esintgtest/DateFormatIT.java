@@ -16,6 +16,8 @@
 package com.amazon.opendistroforelasticsearch.sql.esintgtest;
 
 import com.amazon.opendistroforelasticsearch.sql.exception.SqlParseException;
+import com.amazon.opendistroforelasticsearch.sql.unittest.DateFormatTest;
+import com.google.common.collect.Ordering;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.joda.time.format.DateTimeFormat;
@@ -25,16 +27,20 @@ import org.json.JSONObject;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.is;
 
 public class DateFormatIT extends SQLIntegTestCase {
 
     private static final String SELECT_FROM =
             "SELECT insert_time " +
-            "FROM " + TestsConstants.TEST_INDEX_ONLINE + "/online ";
+            "FROM " + TestsConstants.TEST_INDEX_ONLINE + " ";
 
     @Override
     protected void init() throws Exception {
@@ -116,6 +122,84 @@ public class DateFormatIT extends SQLIntegTestCase {
                       "LIMIT 1000"),
             contains("2014-08-17", "2014-08-24")
         );
+    }
+
+
+    @Test
+    public void sortByDateFormat() throws IOException {
+        // Sort by expression in descending order, but sort inside in ascending order, so we increase our confidence
+        // that successful test isn't just random chance.
+
+        JSONArray hits =
+                getHits(executeQuery("SELECT all_client, insert_time " +
+                        " FROM " + TestsConstants.TEST_INDEX_ONLINE +
+                        " ORDER BY date_format(insert_time, 'dd-MM-YYYY', 'UTC') DESC, insert_time " +
+                        " LIMIT 10"));
+
+        assertThat(new DateTime(getSource(hits.getJSONObject(0)).get("insert_time"), DateTimeZone.UTC),
+                is(new DateTime("2014-08-24T00:00:41.221Z", DateTimeZone.UTC)));
+    }
+
+    @Test
+    public void sortByAliasedDateFormat() throws IOException {
+        JSONArray hits =
+                getHits(executeQuery("SELECT all_client, insert_time,  date_format(insert_time, 'dd-MM-YYYY', 'UTC') date" +
+                        " FROM " + TestsConstants.TEST_INDEX_ONLINE +
+                        " ORDER BY date DESC, insert_time " +
+                        " LIMIT 10"));
+
+        assertThat(new DateTime(getSource(hits.getJSONObject(0)).get("insert_time"), DateTimeZone.UTC),
+                is(new DateTime("2014-08-24T00:00:41.221Z", DateTimeZone.UTC)));
+    }
+
+    @Test
+    public void groupByAndSort() throws IOException {
+        JSONObject aggregations = executeQuery(
+                "SELECT date_format(insert_time, 'dd-MM-YYYY') " +
+                        "FROM elasticsearch-sql_test_index_online " +
+                        "GROUP BY date_format(insert_time, 'dd-MM-YYYY') " +
+                        "ORDER BY date_format(insert_time, 'dd-MM-YYYY') DESC")
+                .getJSONObject("aggregations");
+
+        checkAggregations(aggregations, "date_format", Ordering.natural().reverse());
+    }
+
+    @Test
+    public void groupByAndSortAliasedReversed() throws IOException {
+        JSONObject aggregations = executeQuery(
+                "SELECT date_format(insert_time, 'dd-MM-YYYY') date " +
+                        "FROM elasticsearch-sql_test_index_online " +
+                        "GROUP BY date " +
+                        "ORDER BY date DESC")
+                .getJSONObject("aggregations");
+
+        checkAggregations(aggregations, "date", Ordering.natural().reverse());
+    }
+
+    @Test
+    public void groupByAndSortAliased() throws IOException {
+        JSONObject aggregations = executeQuery(
+                "SELECT date_format(insert_time, 'dd-MM-YYYY') date " +
+                        "FROM elasticsearch-sql_test_index_online " +
+                        "GROUP BY date " +
+                        "ORDER BY date ")
+                .getJSONObject("aggregations");
+
+        checkAggregations(aggregations, "date", Ordering.natural());
+    }
+
+    private void checkAggregations(JSONObject aggregations, String key, Ordering<Comparable> ordering) {
+        String date = DateFormatTest.getScriptAggregationKey(aggregations, key);
+        JSONArray buckets = aggregations.getJSONObject(date).getJSONArray("buckets");
+
+        assertThat(buckets.length(), is(8));
+
+        List<String> aggregationSortKeys = IntStream.range(0, 8)
+                .mapToObj(index -> buckets.getJSONObject(index).getString("key"))
+                .collect(Collectors.toList());
+
+        assertTrue("The query result must be sorted by date in descending order",
+                ordering.isOrdered(aggregationSortKeys));
     }
 
     private Set<Object> dateQuery(String sql) throws SqlParseException {

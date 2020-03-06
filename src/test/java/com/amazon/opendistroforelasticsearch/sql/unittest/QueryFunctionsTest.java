@@ -15,23 +15,23 @@
 
 package com.amazon.opendistroforelasticsearch.sql.unittest;
 
-import com.alibaba.druid.sql.parser.ParserException;
 import com.amazon.opendistroforelasticsearch.sql.esintgtest.TestsConstants;
 import com.amazon.opendistroforelasticsearch.sql.exception.SqlParseException;
 import com.amazon.opendistroforelasticsearch.sql.query.ESActionFactory;
-import com.amazon.opendistroforelasticsearch.sql.query.QueryAction;
 import com.amazon.opendistroforelasticsearch.sql.util.CheckScriptContents;
 import org.apache.lucene.search.join.ScoreMode;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.index.query.AbstractQueryBuilder;
 import org.elasticsearch.index.query.MultiMatchQueryBuilder;
+import org.elasticsearch.search.builder.SearchSourceBuilder.ScriptField;
 import org.hamcrest.Matcher;
 import org.junit.Test;
 import org.mockito.Mockito;
 
 import java.sql.SQLFeatureNotSupportedException;
 
+import static com.amazon.opendistroforelasticsearch.sql.util.SqlExplainUtils.explain;
 import static org.elasticsearch.index.query.QueryBuilders.constantScoreQuery;
 import static org.elasticsearch.index.query.QueryBuilders.matchPhraseQuery;
 import static org.elasticsearch.index.query.QueryBuilders.matchQuery;
@@ -41,6 +41,7 @@ import static org.elasticsearch.index.query.QueryBuilders.queryStringQuery;
 import static org.elasticsearch.index.query.QueryBuilders.wildcardQuery;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.Assert.assertTrue;
 
 public class QueryFunctionsTest {
 
@@ -198,6 +199,79 @@ public class QueryFunctionsTest {
         );
     }
 
+    @Test
+    public void numberLiteralInSelectField() {
+        String query = "SELECT 2 AS number FROM bank WHERE age > 20";
+        ScriptField scriptField = CheckScriptContents.getScriptFieldFromQuery(query);
+        assertTrue(
+                CheckScriptContents.scriptContainsString(
+                     scriptField,
+                     "def assign"
+                )
+        );
+    }
+
+    @Test
+    public void ifFunctionWithConditionStatement() {
+        String query = "SELECT IF(age > 35, 'elastic', 'search') AS Ages FROM accounts";
+        ScriptField scriptField = CheckScriptContents.getScriptFieldFromQuery(query);
+        assertTrue(
+                CheckScriptContents.scriptContainsString(
+                        scriptField,
+                        "boolean cond = doc['age'].value > 35;"
+                )
+        );
+    }
+
+    @Test
+    public void ifFunctionWithEquationConditionStatement() {
+        String query = "SELECT IF(age = 35, 'elastic', 'search') AS Ages FROM accounts";
+        ScriptField scriptField = CheckScriptContents.getScriptFieldFromQuery(query);
+        assertTrue(
+                CheckScriptContents.scriptContainsString(
+                        scriptField,
+                        "boolean cond = doc['age'].value == 35;"
+                )
+        );
+    }
+
+    @Test
+    public void ifFunctionWithConstantConditionStatement() {
+        String query = "SELECT IF(1 = 2, 'elastic', 'search') FROM accounts";
+        ScriptField scriptField = CheckScriptContents.getScriptFieldFromQuery(query);
+        assertTrue(
+                CheckScriptContents.scriptContainsString(
+                        scriptField,
+                        "boolean cond = 1 == 2;"
+                )
+        );
+    }
+
+    @Test
+    public void ifNull() {
+        String query = "SELECT IFNULL(lastname, 'Unknown') FROM accounts";
+        ScriptField scriptField = CheckScriptContents.getScriptFieldFromQuery(query);
+        assertTrue(
+                CheckScriptContents.scriptContainsString(
+                        scriptField,
+                        "doc['lastname'].size()==0"
+                )
+        );
+    }
+
+    @Test
+    public void isNullWithMathExpr() {
+        String query = "SELECT ISNULL(1+1) FROM accounts";
+        ScriptField scriptField = CheckScriptContents.getScriptFieldFromQuery(query);
+        assertTrue(
+                CheckScriptContents.scriptContainsString(
+                        scriptField,
+                        "catch(ArithmeticException e)"
+                )
+        );
+
+    }
+
     @Test(expected = SQLFeatureNotSupportedException.class)
     public void emptyQueryShouldThrowSQLFeatureNotSupportedException() throws SQLFeatureNotSupportedException, SqlParseException {
         ESActionFactory.create(Mockito.mock(Client.class), "");
@@ -227,16 +301,8 @@ public class QueryFunctionsTest {
         return explain(SELECT_ALL + " " + from + " " + String.join(" ", statements));
     }
 
-    private String explain(String sql) {
-        try {
-            Client mockClient = Mockito.mock(Client.class);
-            CheckScriptContents.stubMockClient(mockClient);
-            QueryAction queryAction = ESActionFactory.create(mockClient, sql);
-
-            return queryAction.explain().explain();
-        } catch (SqlParseException | SQLFeatureNotSupportedException e) {
-            throw new ParserException("Illegal sql expr in: " + sql);
-        }
+    private String query(String sql) {
+        return explain(sql);
     }
 
     private Matcher<String> contains(AbstractQueryBuilder queryBuilder) {

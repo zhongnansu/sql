@@ -19,6 +19,7 @@ import com.google.common.collect.Sets;
 import org.elasticsearch.client.Request;
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.io.IOException;
@@ -30,7 +31,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
+import static java.util.stream.Collectors.toSet;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
@@ -60,6 +63,8 @@ public class PrettyFormatResponseIT extends SQLIntegTestCase {
     private static final Set<String> messageFields = Sets.newHashSet(
             "message.dayOfWeek", "message.info", "message.author");
 
+    private static final Set<String> commentFields = Sets.newHashSet("comment.data", "comment.likes");
+
     private static final List<String> nameFields = Arrays.asList("firstname", "lastname");
 
     private final int RESPONSE_DEFAULT_MAX_SIZE = 200;
@@ -80,6 +85,7 @@ public class PrettyFormatResponseIT extends SQLIntegTestCase {
         return sqlRequest;
     }
 
+    @Ignore("Index type is removed in ES 7+")
     @Test
     public void wrongIndexType() throws IOException  {
         String type = "wrongType";
@@ -94,8 +100,8 @@ public class PrettyFormatResponseIT extends SQLIntegTestCase {
     @Test
     public void selectAll() throws IOException {
         JSONObject response = executeQuery(
-                                String.format(Locale.ROOT, "SELECT * FROM %s/%s",
-                                        TestsConstants.TEST_INDEX_ACCOUNT, "account"));
+                                String.format(Locale.ROOT, "SELECT * FROM %s",
+                                        TestsConstants.TEST_INDEX_ACCOUNT));
 
         // This also tests that .keyword fields are ignored when SELECT * is called
         assertContainsColumnsInAnyOrder(getSchema(response), allAccountFields);
@@ -105,13 +111,14 @@ public class PrettyFormatResponseIT extends SQLIntegTestCase {
     @Test
     public void selectNames() throws IOException {
         JSONObject response = executeQuery(
-                                String.format(Locale.ROOT, "SELECT firstname, lastname FROM %s/%s",
-                                        TestsConstants.TEST_INDEX_ACCOUNT, "account"));
+                                String.format(Locale.ROOT, "SELECT firstname, lastname FROM %s",
+                                        TestsConstants.TEST_INDEX_ACCOUNT));
 
         assertContainsColumns(getSchema(response), nameFields);
         assertContainsData(getDataRows(response), nameFields);
     }
 
+    @Ignore("Semantic analysis takes care of this")
     @Test
     public void selectWrongField() throws IOException {
         JSONObject response = executeQuery(
@@ -158,21 +165,50 @@ public class PrettyFormatResponseIT extends SQLIntegTestCase {
 
     @Test
     public void selectAllFromNestedWithoutFieldInFrom() throws IOException {
-        JSONObject response = executeQuery(String.format(Locale.ROOT, "SELECT * FROM %s",
-                TestsConstants.TEST_INDEX_NESTED_TYPE));
-
-        assertContainsColumnsInAnyOrder(getSchema(response), regularFields);
-        assertContainsData(getDataRows(response), regularFields);
+        assertNestedFieldQueryResultContainsColumnsAndData("SELECT * FROM %s",
+                                                           regularFields, fields("message", "comment"));
     }
 
     @Test
     public void selectAllFromNestedWithFieldInFrom() throws IOException {
-        JSONObject response = executeQuery(
-                                String.format(Locale.ROOT, "SELECT * FROM %s e, e.message m",
-                                        TestsConstants.TEST_INDEX_NESTED_TYPE));
+        assertNestedFieldQueryResultContainsColumnsAndData("SELECT * FROM %s e, e.message m",
+                                                           regularFields, messageFields);
+    }
 
-        assertContainsColumnsInAnyOrder(getSchema(response), messageFields);
-        assertContainsData(getDataRows(response), messageFields);
+    @Test
+    public void selectAllFromNestedWithMultipleFieldsInFrom() throws IOException {
+        assertNestedFieldQueryResultContainsColumnsAndData("SELECT * FROM %s e, e.message m, e.comment c",
+                                                           regularFields, messageFields, commentFields);
+    }
+
+    @Test
+    public void selectAllNestedFromNestedWithFieldInFrom() throws IOException {
+        assertNestedFieldQueryResultContainsColumnsAndData("SELECT m.* FROM %s e, e.message m", messageFields);
+    }
+
+    @Test
+    public void selectSpecificRegularFieldAndAllFromNestedWithFieldInFrom() throws IOException {
+        assertNestedFieldQueryResultContainsColumnsAndData("SELECT e.someField, m.* FROM %s e, e.message m",
+                                                           fields("someField"), messageFields);
+    }
+
+    /**
+     * Execute the query against index with nested fields and assert result contains columns and data as expected.
+     */
+    @SafeVarargs
+    private final void assertNestedFieldQueryResultContainsColumnsAndData(String query,
+                                                                          Set<String>... expectedFieldNames) throws IOException {
+        JSONObject response = executeQuery(String.format(Locale.ROOT, query, TestsConstants.TEST_INDEX_NESTED_TYPE));
+        Set<String> allExpectedFieldNames = Stream.of(expectedFieldNames).
+                                                   flatMap(Set::stream).
+                                                   collect(toSet());
+
+        assertContainsColumnsInAnyOrder(getSchema(response), allExpectedFieldNames);
+        assertContainsData(getDataRows(response), allExpectedFieldNames);
+    }
+
+    private Set<String> fields(String... fieldNames) {
+        return Sets.newHashSet(fieldNames);
     }
 
     @Test
@@ -205,9 +241,9 @@ public class PrettyFormatResponseIT extends SQLIntegTestCase {
         int balanceToCompare = 30000;
         JSONObject response = executeQuery(
                                 String.format(Locale.ROOT, "SELECT balance " +
-                                              "FROM %s/%s " +
+                                              "FROM %s " +
                                               "WHERE balance > %d",
-                                        TestsConstants.TEST_INDEX_ACCOUNT, "account", balanceToCompare));
+                                        TestsConstants.TEST_INDEX_ACCOUNT, balanceToCompare));
 
         /*
          * Previously the DataRows map was used to check specific fields but the JDBC response for "datarows" is a
@@ -277,8 +313,7 @@ public class PrettyFormatResponseIT extends SQLIntegTestCase {
                                 String.format(Locale.ROOT, "SELECT COUNT(*) FROM %s GROUP BY age",
                                         TestsConstants.TEST_INDEX_ACCOUNT));
 
-        String count = "COUNT(*)";
-        List<String> fields = Arrays.asList("age", count);
+        List<String> fields = Arrays.asList("COUNT(*)");
         assertContainsColumns(getSchema(response), fields);
 
         JSONArray dataRows = getDataRows(response);
@@ -296,8 +331,7 @@ public class PrettyFormatResponseIT extends SQLIntegTestCase {
                                 String.format(Locale.ROOT, "SELECT count(*) FROM %s GROUP BY age",
                                         TestsConstants.TEST_INDEX_ACCOUNT));
 
-        String count = "COUNT(*)";
-        List<String> fields = Arrays.asList("age", count);
+        List<String> fields = Arrays.asList("COUNT(*)");
         assertContainsColumns(getSchema(response), fields);
 
         JSONArray dataRows = getDataRows(response);
@@ -315,8 +349,7 @@ public class PrettyFormatResponseIT extends SQLIntegTestCase {
                                 String.format(Locale.ROOT, "SELECT COUNT(*) AS total FROM %s GROUP BY age",
                                         TestsConstants.TEST_INDEX_ACCOUNT));
 
-        String count = "total";
-        List<String> fields = Arrays.asList("age", count);
+        List<String> fields = Arrays.asList("total");
         assertContainsColumns(getSchema(response), fields);
 
         JSONArray dataRows = getDataRows(response);
@@ -334,7 +367,7 @@ public class PrettyFormatResponseIT extends SQLIntegTestCase {
                                 String.format(Locale.ROOT, "SELECT SUM(age) FROM %s GROUP BY age, state.keyword",
                                         TestsConstants.TEST_INDEX_ACCOUNT));
 
-        List<String> fields = Arrays.asList("age", "state.keyword", "SUM(age)");
+        List<String> fields = Arrays.asList("SUM(age)");
         assertContainsColumns(getSchema(response), fields);
         assertContainsData(getDataRows(response), fields);
     }
@@ -362,9 +395,26 @@ public class PrettyFormatResponseIT extends SQLIntegTestCase {
                                 String.format(Locale.ROOT, "SELECT COUNT(*), AVG(age) FROM %s GROUP BY age",
                                         TestsConstants.TEST_INDEX_ACCOUNT));
 
-        List<String> fields = Arrays.asList("age", "COUNT(*)", "AVG(age)");
+        List<String> fields = Arrays.asList("COUNT(*)", "AVG(age)");
         assertContainsColumns(getSchema(response), fields);
         assertContainsData(getDataRows(response), fields);
+    }
+
+    @Test
+    public void aggregationFunctionInHaving() throws IOException {
+        JSONObject response = executeQuery(String.format(Locale.ROOT,
+                                                         "SELECT gender " +
+                                                         "FROM %s " +
+                                                         "GROUP BY gender " +
+                                                         "HAVING count(*) > 500",
+                                                         TestsConstants.TEST_INDEX_ACCOUNT));
+
+        String ageSum = "gender";
+        assertContainsColumns(getSchema(response), Collections.singletonList(ageSum));
+
+        JSONArray dataRows = getDataRows(response);
+        assertEquals(1, dataRows.length());
+        assertEquals("m", dataRows.getJSONArray(0).getString(0));
     }
 
     /**

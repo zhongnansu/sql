@@ -15,6 +15,9 @@
 
 package com.amazon.opendistroforelasticsearch.sql.rewriter.nestedfield;
 
+import com.amazon.opendistroforelasticsearch.sql.domain.Field;
+import com.amazon.opendistroforelasticsearch.sql.rewriter.matchtoterm.VerificationException;
+import com.amazon.opendistroforelasticsearch.sql.utils.StringUtils;
 import org.apache.lucene.search.join.ScoreMode;
 import org.elasticsearch.action.search.SearchRequestBuilder;
 import org.elasticsearch.index.query.BoolQueryBuilder;
@@ -22,7 +25,6 @@ import org.elasticsearch.index.query.InnerHitBuilder;
 import org.elasticsearch.index.query.NestedQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.search.fetch.subphase.FetchSourceContext;
-import com.amazon.opendistroforelasticsearch.sql.domain.Field;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -38,6 +40,8 @@ import static java.util.stream.Collectors.toList;
 import static org.elasticsearch.index.query.QueryBuilders.boolQuery;
 import static org.elasticsearch.index.query.QueryBuilders.matchAllQuery;
 import static org.elasticsearch.index.query.QueryBuilders.nestedQuery;
+import static org.elasticsearch.index.query.QueryBuilders.existsQuery;
+import static com.alibaba.druid.sql.ast.statement.SQLJoinTableSource.JoinType;
 
 /**
  * Nested field projection class to make ES return matched rows in nested field.
@@ -52,20 +56,44 @@ public class NestedFieldProjection {
 
     /**
      * Project nested field in SELECT clause to InnerHit in NestedQueryBuilder
-     * @param fields    list of field domain object
+     *
+     * @param fields list of field domain object
      */
-    public void project(List<Field> fields) {
+    public void project(List<Field> fields, JoinType nestedJoinType) {
         if (isAnyNestedField(fields)) {
             initBoolQueryFilterIfNull();
-
             List<NestedQueryBuilder> nestedQueries = extractNestedQueries(query());
-            groupFieldNamesByPath(fields).forEach(
-                (path, fieldNames) -> buildInnerHit(fieldNames, findNestedQueryWithSamePath(nestedQueries, path))
-            );
+
+            if (nestedJoinType == JoinType.LEFT_OUTER_JOIN) {
+                // for LEFT JOIN on nested field as right table, the query will have only one nested field, so one path
+                Map<String, List<String>> fieldNamesByPath = groupFieldNamesByPath(fields);
+
+                if (fieldNamesByPath.size() > 1) {
+                    String message = StringUtils.format(
+                        "only single nested field is allowed as right table for LEFT JOIN, found %s ",
+                        fieldNamesByPath.keySet()
+                    );
+
+                    throw new VerificationException(message);
+                }
+
+                Map.Entry<String, List<String>> pathToFields = fieldNamesByPath.entrySet().iterator().next();
+                String path = pathToFields.getKey();
+                List<String> fieldNames = pathToFields.getValue();
+                buildNestedLeftJoinQuery(path, fieldNames);
+            } else {
+
+                groupFieldNamesByPath(fields).forEach(
+                    (path, fieldNames) -> buildInnerHit(fieldNames, findNestedQueryWithSamePath(nestedQueries, path))
+                );
+            }
         }
     }
 
-    /** Check via traditional for loop first to avoid lambda performance impact on all queries even though those without nested field */
+    /**
+     * Check via traditional for loop first to avoid lambda performance impact on all queries
+     * even though those without nested field
+     */
     private boolean isAnyNestedField(List<Field> fields) {
         for (Field field : fields) {
             if (field.isNested() && !field.isReverseNested()) {
@@ -86,16 +114,16 @@ public class NestedFieldProjection {
 
     private Map<String, List<String>> groupFieldNamesByPath(List<Field> fields) {
         return fields.stream().
-                      filter(Field::isNested).
-                      filter(not(Field::isReverseNested)).
-                      collect(groupingBy(Field::getNestedPath, mapping(Field::getName, toList())));
+                filter(Field::isNested).
+                filter(not(Field::isReverseNested)).
+                collect(groupingBy(Field::getNestedPath, mapping(Field::getName, toList())));
     }
 
     /**
      * Why search for NestedQueryBuilder recursively?
      * Because 1) it was added and wrapped by BoolQuery when WHERE explained (far from here)
-     *         2) InnerHit must be added to the NestedQueryBuilder related
-     *
+     * 2) InnerHit must be added to the NestedQueryBuilder related
+     * <p>
      * Either we store it to global data structure (which requires to be thread-safe or ThreadLocal)
      * or we peel off BoolQuery to find it (the way we followed here because recursion tree should be very thin).
      */
@@ -103,19 +131,18 @@ public class NestedFieldProjection {
         List<NestedQueryBuilder> result = new ArrayList<>();
         if (query instanceof NestedQueryBuilder) {
             result.add((NestedQueryBuilder) query);
-        }
-        else if (query instanceof BoolQueryBuilder) {
+        } else if (query instanceof BoolQueryBuilder) {
             BoolQueryBuilder boolQ = (BoolQueryBuilder) query;
             Stream.of(boolQ.filter(), boolQ.must(), boolQ.should()).
-                   flatMap(Collection::stream).
-                   forEach(q -> result.addAll(extractNestedQueries(q)));
+                    flatMap(Collection::stream).
+                    forEach(q -> result.addAll(extractNestedQueries(q)));
         }
         return result;
     }
 
     private void buildInnerHit(List<String> fieldNames, NestedQueryBuilder query) {
         query.innerHit(new InnerHitBuilder().setFetchSourceContext(
-            new FetchSourceContext(true, fieldNames.toArray(new String[0]), null)
+                new FetchSourceContext(true, fieldNames.toArray(new String[0]), null)
         ));
     }
 
@@ -125,16 +152,18 @@ public class NestedFieldProjection {
      */
     private NestedQueryBuilder findNestedQueryWithSamePath(List<NestedQueryBuilder> nestedQueries, String path) {
         return nestedQueries.stream().
-                             filter(query -> isSamePath(path, query)).
-                             findAny().
-                             orElseGet(createEmptyNestedQuery(path));
+                filter(query -> isSamePath(path, query)).
+                findAny().
+                orElseGet(createEmptyNestedQuery(path));
     }
 
     private boolean isSamePath(String path, NestedQueryBuilder query) {
         return nestedQuery(path, query.query(), query.scoreMode()).equals(query);
     }
 
-    /** Create a nested query with match all filter to place inner hits */
+    /**
+     * Create a nested query with match all filter to place inner hits
+     */
     private Supplier<NestedQueryBuilder> createEmptyNestedQuery(String path) {
         return () -> {
             NestedQueryBuilder nestedQuery = nestedQuery(path, matchAllQuery(), ScoreMode.None);
@@ -151,4 +180,15 @@ public class NestedFieldProjection {
         return predicate.negate();
     }
 
+
+    private void buildNestedLeftJoinQuery(String path, List<String> fieldNames) {
+        BoolQueryBuilder existsNestedQuery = boolQuery();
+        existsNestedQuery.mustNot().add(nestedQuery(path, existsQuery(path), ScoreMode.None));
+
+        NestedQueryBuilder matchAllNestedQuery = nestedQuery(path, matchAllQuery(), ScoreMode.None);
+        buildInnerHit(fieldNames, matchAllNestedQuery);
+
+        ((BoolQueryBuilder) query().filter().get(0)).should().add(existsNestedQuery);
+        ((BoolQueryBuilder) query().filter().get(0)).should().add(matchAllNestedQuery);
+    }
 }

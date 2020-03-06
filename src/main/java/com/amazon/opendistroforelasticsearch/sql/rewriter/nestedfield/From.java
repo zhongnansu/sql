@@ -38,7 +38,21 @@ class From extends SQLClause<SQLTableSource> {
      */
     @Override
     void rewrite(Scope scope) {
-        if (!isCommaJoin() || parentAlias(scope).isEmpty()) {
+        if (!isJoin()) {
+            return;
+        }
+
+        // At this point, FROM expr is SQLJoinTableSource.
+        if (!isCommaJoin()) {
+            scope.setActualJoinType(((SQLJoinTableSource) expr).getJoinType());
+            ((SQLJoinTableSource) expr).setJoinType(COMMA);
+        }
+
+        if (parentAlias(scope).isEmpty()) {
+            // Could also be empty now since normal JOIN tables may not have alias
+            if (scope.getActualJoinType() != null) {
+                ((SQLJoinTableSource) expr).setJoinType(scope.getActualJoinType());
+            }
             return;
         }
 
@@ -46,6 +60,9 @@ class From extends SQLClause<SQLTableSource> {
         if (scope.isAnyNestedField()) {
             eraseParentAlias();
             keepParentTableOnly();
+        } else if (scope.getActualJoinType() != null){
+            // set back the JoinType to original value if non COMMA JOIN on regular tables
+            ((SQLJoinTableSource) expr).setJoinType(scope.getActualJoinType());
         }
     }
 
@@ -54,7 +71,9 @@ class From extends SQLClause<SQLTableSource> {
         return emptyIfNull(scope.getParentAlias());
     }
 
-    /** Erase alias otherwise NLPchina has problem parsing nested field like 't.employees.name' */
+    /**
+     * Erase alias otherwise NLPchina has problem parsing nested field like 't.employees.name'
+     */
     private void eraseParentAlias() {
         left().expr.setAlias(null);
     }
@@ -68,16 +87,16 @@ class From extends SQLClause<SQLTableSource> {
     /**
      * Collect path alias and full path mapping of nested field in FROM clause.
      * Sample:
-     *  FROM team t, t.employees e ...
-     *
-     *         Join
-     *        /    \
-     *  team t    Join
-     *           /    \
-     *  t.employees e  ...
-     *
-     *  t.employees is nested because path "t" == parentAlias "t"
-     *  Save path alias to full path name mapping {"e": "employees"} to Scope
+     * FROM team t, t.employees e ...
+     * <p>
+     * Join
+     * /    \
+     * team t    Join
+     * /    \
+     * t.employees e  ...
+     * <p>
+     * t.employees is nested because path "t" == parentAlias "t"
+     * Save path alias to full path name mapping {"e": "employees"} to Scope
      */
     private void collectNestedFields(Scope scope) {
         From clause = this;
@@ -91,6 +110,10 @@ class From extends SQLClause<SQLTableSource> {
         return expr instanceof SQLJoinTableSource && ((SQLJoinTableSource) expr).getJoinType() == COMMA;
     }
 
+    private boolean isJoin() {
+        return expr instanceof SQLJoinTableSource;
+    }
+
     private From left() {
         return new From(((SQLJoinTableSource) expr).getLeft());
     }
@@ -100,8 +123,8 @@ class From extends SQLClause<SQLTableSource> {
     }
 
     private void addIfNestedField(Scope scope) {
-        if (!(expr instanceof SQLExprTableSource &&
-                ((SQLExprTableSource) expr).getExpr() instanceof SQLIdentifierExpr)) {
+        if (!(expr instanceof SQLExprTableSource
+                && ((SQLExprTableSource) expr).getExpr() instanceof SQLIdentifierExpr)) {
             return;
         }
 

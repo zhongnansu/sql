@@ -15,15 +15,24 @@
 
 package com.amazon.opendistroforelasticsearch.sql.executor.format;
 
-import org.elasticsearch.client.Client;
-import com.amazon.opendistroforelasticsearch.sql.executor.format.DataRows.Row;
-import com.amazon.opendistroforelasticsearch.sql.executor.format.Schema.Column;
-import org.json.JSONArray;
-import org.json.JSONObject;
+import com.amazon.opendistroforelasticsearch.sql.domain.ColumnTypeProvider;
+import com.amazon.opendistroforelasticsearch.sql.domain.Delete;
 import com.amazon.opendistroforelasticsearch.sql.domain.IndexStatement;
 import com.amazon.opendistroforelasticsearch.sql.domain.Query;
 import com.amazon.opendistroforelasticsearch.sql.domain.QueryStatement;
+import com.amazon.opendistroforelasticsearch.sql.executor.adapter.QueryPlanQueryAction;
+import com.amazon.opendistroforelasticsearch.sql.executor.adapter.QueryPlanRequestBuilder;
+import com.amazon.opendistroforelasticsearch.sql.executor.format.DataRows.Row;
+import com.amazon.opendistroforelasticsearch.sql.executor.format.Schema.Column;
+import com.amazon.opendistroforelasticsearch.sql.expression.domain.BindingTuple;
+import com.amazon.opendistroforelasticsearch.sql.query.DefaultQueryAction;
+import com.amazon.opendistroforelasticsearch.sql.query.QueryAction;
+import com.amazon.opendistroforelasticsearch.sql.query.planner.core.ColumnNode;
+import org.elasticsearch.client.Client;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
+import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
@@ -40,10 +49,18 @@ public class Protocol {
     private long total;
     private ResultSet resultSet;
     private ErrorMessage error;
+    private List<ColumnNode> columnNodeList;
+    private ColumnTypeProvider scriptColumnType = new ColumnTypeProvider();
 
-    public Protocol(Client client, QueryStatement query, Object queryResult, String formatType) {
+    public Protocol(Client client, QueryAction queryAction, Object queryResult, String formatType) {
+        if (queryAction instanceof QueryPlanQueryAction) {
+            this.columnNodeList =
+                    ((QueryPlanRequestBuilder) (((QueryPlanQueryAction) queryAction).explain())).outputColumns();
+        } else if (queryAction instanceof DefaultQueryAction) {
+            scriptColumnType = queryAction.getScriptColumnType();
+        }
         this.formatType = formatType;
-
+        QueryStatement query = queryAction.getQueryStatement();
         this.status = OK_STATUS;
         this.resultSet = loadResultSet(client, query, queryResult);
         this.size = resultSet.getDataRows().getSize();
@@ -57,8 +74,13 @@ public class Protocol {
     }
 
     private ResultSet loadResultSet(Client client, QueryStatement queryStatement, Object queryResult) {
-        if (queryStatement instanceof Query) {
-            return new SelectResultSet(client, (Query) queryStatement, queryResult);
+        if (queryResult instanceof List) {
+            return new BindingTupleResultSet(columnNodeList, (List<BindingTuple>) queryResult);
+        }
+        if (queryStatement instanceof Delete) {
+            return new DeleteResultSet(client, (Delete) queryStatement, queryResult);
+        } else if (queryStatement instanceof Query) {
+            return new SelectResultSet(client, (Query) queryStatement, queryResult, scriptColumnType, formatType);
         } else if (queryStatement instanceof IndexStatement) {
             IndexStatement statement = (IndexStatement) queryStatement;
             StatementType statementType = statement.getStatementType();
@@ -76,9 +98,13 @@ public class Protocol {
         );
     }
 
-    public int getStatus() { return status; }
+    public int getStatus() {
+        return status;
+    }
 
-    public ResultSet getResultSet() { return resultSet; }
+    public ResultSet getResultSet() {
+        return resultSet;
+    }
 
     public String format() {
         if (status == OK_STATUS) {
@@ -149,7 +175,9 @@ public class Protocol {
     private JSONObject schemaEntry(String name, String alias, String type) {
         JSONObject entry = new JSONObject();
         entry.put("name", name);
-        if (alias != null) { entry.put("alias", alias); }
+        if (alias != null) {
+            entry.put("alias", alias);
+        }
         entry.put("type", type);
 
         return entry;

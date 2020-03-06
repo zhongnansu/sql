@@ -17,63 +17,78 @@ package com.amazon.opendistroforelasticsearch.sql.domain;
 
 import com.amazon.opendistroforelasticsearch.sql.domain.hints.Hint;
 import com.amazon.opendistroforelasticsearch.sql.parser.SubQueryExpression;
+import com.google.common.collect.ImmutableSet;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
+
+import static com.alibaba.druid.sql.ast.statement.SQLJoinTableSource.JoinType;
+import static com.amazon.opendistroforelasticsearch.sql.domain.Field.STAR;
+
 
 /**
  * 将sql语句转换为select 对象
- * 
+ *
  * @author ansj
  */
 public class Select extends Query {
 
-	// Using this functions, will cause query to execute as aggregation.
-	private final List<String> aggsFunctions = Arrays.asList("SUM", "MAX", "MIN", "AVG", "TOPHITS", "COUNT", "STATS","EXTENDED_STATS","PERCENTILES","SCRIPTED_METRIC");
+    /**
+     * Using this functions will cause query to execute as aggregation.
+     */
+    private static final Set<String> AGGREGATE_FUNCTIONS =
+            ImmutableSet.of(
+                    "SUM", "MAX", "MIN", "AVG",
+                    "TOPHITS", "COUNT", "STATS", "EXTENDED_STATS",
+                    "PERCENTILES", "SCRIPTED_METRIC"
+            );
+
     private List<Hint> hints = new ArrayList<>();
-	private List<Field> fields = new ArrayList<>();
-	private List<List<Field>> groupBys = new ArrayList<>();
-	private Having having;
-	private List<Order> orderBys = new ArrayList<>();
-	private int offset;
-	private int rowCount = 200;
+    private List<Field> fields = new ArrayList<>();
+    private List<List<Field>> groupBys = new ArrayList<>();
+    private Having having;
+    private List<Order> orderBys = new ArrayList<>();
+    private int offset;
+    private int rowCount = 200;
     private boolean containsSubQueries;
     private List<SubQueryExpression> subQueries;
-	public boolean isQuery = false;
     private boolean selectAll = false;
+    private JoinType nestedJoinType = JoinType.COMMA;
 
-	public boolean isAgg = false;
+    public boolean isQuery = false;
+    public boolean isAggregate = false;
 
-	public Select() {
-	}
+    public Select() {
+    }
 
-	public List<Field> getFields() {
-		return fields;
-	}
+    public List<Field> getFields() {
+        return fields;
+    }
 
-	public void setOffset(int offset) {
-		this.offset = offset;
-	}
+    public void setOffset(int offset) {
+        this.offset = offset;
+    }
 
-	public void setRowCount(int rowCount) {
-		this.rowCount = rowCount;
-	}
+    public void setRowCount(int rowCount) {
+        this.rowCount = rowCount;
+    }
 
-	public void addGroupBy(Field field) {
-		List<Field> wrapper = new ArrayList<>();
-		wrapper.add(field);
-		addGroupBy(wrapper);
-	}
+    public void addGroupBy(Field field) {
+        List<Field> wrapper = new ArrayList<>();
+        wrapper.add(field);
+        addGroupBy(wrapper);
+    }
 
-	public void addGroupBy(List<Field> fields) {
-		isAgg = true;
-		this.groupBys.add(fields);
-	}
+    public void addGroupBy(List<Field> fields) {
+        isAggregate = true;
+        selectAll = false;
+        this.groupBys.add(fields);
+    }
 
-	public List<List<Field>> getGroupBys() {
-		return groupBys;
-	}
+    public List<List<Field>> getGroupBys() {
+        return groupBys;
+    }
 
     public Having getHaving() {
         return having;
@@ -83,43 +98,53 @@ public class Select extends Query {
         this.having = having;
     }
 
-	public List<Order> getOrderBys() {
-		return orderBys;
-	}
+    public List<Order> getOrderBys() {
+        return orderBys;
+    }
 
-	public int getOffset() {
-		return offset;
-	}
+    public int getOffset() {
+        return offset;
+    }
 
-	public int getRowCount() {
-		return rowCount;
-	}
+    public int getRowCount() {
+        return rowCount;
+    }
 
-	public void addOrderBy(String nestedPath, String name, String type) {
-		if ("_score".equals(name)) {
-			isQuery = true;
-		}
-		this.orderBys.add(new Order(nestedPath, name, type));
-	}
+    public void addOrderBy(String nestedPath, String name, String type, Field field) {
+        if ("_score".equals(name)) {
+            isQuery = true;
+        }
+        this.orderBys.add(new Order(nestedPath, name, type, field));
+    }
 
-
-	public void addField(Field field) {
-		if (field == null ) {
-			return;
-		}
-        if(field.getName().equals("*")){
+    public void addField(Field field) {
+        if (field == null) {
+            return;
+        }
+        if (field == STAR && !isAggregate) {
+            // Ignore GROUP BY since columns present in result are decided by column list in GROUP BY
             this.selectAll = true;
+            return;
         }
 
-		if(field instanceof  MethodField && aggsFunctions.contains(field.getName().toUpperCase())) {
-			isAgg = true;
-		}
+        if (field instanceof MethodField && AGGREGATE_FUNCTIONS.contains(field.getName().toUpperCase())) {
+            isAggregate = true;
+        }
 
-		fields.add(field);
-	}
+        fields.add(field);
+    }
 
     public List<Hint> getHints() {
         return hints;
+    }
+
+
+    public JoinType getNestedJoinType() {
+        return nestedJoinType;
+    }
+
+    public void setNestedJoinType(JoinType nestedJoinType) {
+        this.nestedJoinType = nestedJoinType;
     }
 
 
@@ -130,26 +155,28 @@ public class Select extends Query {
     }
 
     private void fillSubQueriesFromWhereRecursive(Where where) {
-        if(where == null) return;
-        if(where instanceof Condition){
+        if (where == null) {
+            return;
+        }
+        if (where instanceof Condition) {
             Condition condition = (Condition) where;
-            if ( condition.getValue() instanceof SubQueryExpression){
+            if (condition.getValue() instanceof SubQueryExpression) {
                 this.subQueries.add((SubQueryExpression) condition.getValue());
                 this.containsSubQueries = true;
             }
-            if(condition.getValue() instanceof Object[]){
+            if (condition.getValue() instanceof Object[]) {
 
-                for(Object o : (Object[]) condition.getValue()){
-                    if ( o instanceof SubQueryExpression){
+                for (Object o : (Object[]) condition.getValue()) {
+                    if (o instanceof SubQueryExpression) {
                         this.subQueries.add((SubQueryExpression) o);
                         this.containsSubQueries = true;
                     }
                 }
             }
-        }
-        else {
-            for(Where innerWhere : where.getWheres())
+        } else {
+            for (Where innerWhere : where.getWheres()) {
                 fillSubQueriesFromWhereRecursive(innerWhere);
+            }
         }
     }
 
@@ -161,8 +188,8 @@ public class Select extends Query {
         return subQueries;
     }
 
-    public boolean isOrderdSelect(){
-        return this.getOrderBys()!=null && this.getOrderBys().size() >0 ;
+    public boolean isOrderdSelect() {
+        return this.getOrderBys() != null && this.getOrderBys().size() > 0;
     }
 
     public boolean isSelectAll() {

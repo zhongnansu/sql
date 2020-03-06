@@ -19,24 +19,34 @@ import com.alibaba.druid.sql.ast.SQLExpr;
 import com.alibaba.druid.sql.ast.expr.SQLQueryExpr;
 import com.alibaba.druid.sql.parser.ParserException;
 import com.alibaba.druid.sql.parser.Token;
+import com.amazon.opendistroforelasticsearch.sql.domain.Order;
 import com.amazon.opendistroforelasticsearch.sql.domain.Select;
 import com.amazon.opendistroforelasticsearch.sql.exception.SqlParseException;
 import com.amazon.opendistroforelasticsearch.sql.parser.ElasticSqlExprParser;
 import com.amazon.opendistroforelasticsearch.sql.parser.SqlParser;
+import com.amazon.opendistroforelasticsearch.sql.query.AggregationQueryAction;
 import com.amazon.opendistroforelasticsearch.sql.query.maker.QueryMaker;
 import com.amazon.opendistroforelasticsearch.sql.util.MatcherUtils;
+import org.elasticsearch.client.Client;
+import org.elasticsearch.common.lucene.BytesRefs;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
-import org.elasticsearch.common.lucene.BytesRefs;
 import org.elasticsearch.index.query.RangeQueryBuilder;
-import org.hamcrest.*;
+import org.hamcrest.Matcher;
+import org.json.JSONObject;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.util.List;
 
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.*;
 import static com.amazon.opendistroforelasticsearch.sql.util.HasFieldWithValue.hasFieldWithValue;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasProperty;
+import static org.hamcrest.Matchers.is;
+import static org.mockito.Mockito.mock;
 
 public class DateFormatTest {
 
@@ -59,6 +69,89 @@ public class DateFormatTest {
         // Equality query for date_format is created with a rangeQuery where the 'from' and 'to' values are equal to the value we are equating to
         assertThat(q, hasQueryWithValue("from", equalTo(BytesRefs.toBytesRef("2018-04-02")))); // converting string to bytes ref as RangeQueryBuilder stores it this way
         assertThat(q, hasQueryWithValue("to", equalTo(BytesRefs.toBytesRef("2018-04-02"))));
+    }
+
+    @Test
+    public void orderByTest() {
+        String query = "SELECT agent, ip, date_format(utc_time, 'dd-MM-YYYY') date " +
+                "FROM kibana_sample_data_logs " +
+                "ORDER BY date_format(utc_time, 'dd-MM-YYYY') desc, ip";
+
+        Select select = getSelect(query);
+
+        List<Order> orderBys = select.getOrderBys();
+        assertThat(orderBys.size(), equalTo(2));
+
+        Order formula = orderBys.get(0);
+
+        assertThat(formula.isScript(), is(true));
+        assertThat(formula.getType(), is("DESC"));
+        assertThat(formula.getName(), containsString("DateTimeFormatter.ofPattern"));
+
+        Order ip = orderBys.get(1);
+
+        assertThat(ip.isScript(), is(false));
+        assertThat(ip.getName(), is("ip"));
+        assertThat(ip.getType(), is("ASC"));
+    }
+
+    @Test
+    public void groupByWithDescOrder() throws SqlParseException {
+        String query = "SELECT date_format(utc_time, 'dd-MM-YYYY'), count(*) " +
+                "FROM kibana_sample_data_logs " +
+                "GROUP BY date_format(utc_time, 'dd-MM-YYYY') " +
+                "ORDER BY date_format(utc_time, 'dd-MM-YYYY') DESC";
+
+        JSONObject aggregation = getAggregation(query);
+        assertThat(aggregation.getInt("size"), is(getSelect(query).getRowCount()));
+        assertThat(aggregation.getJSONObject("order").getString("_key"), is("desc"));
+    }
+
+    @Test
+    public void groupByWithAscOrder() throws SqlParseException {
+        String query = "SELECT date_format(utc_time, 'dd-MM-YYYY'), count(*) " +
+                "FROM kibana_sample_data_logs " +
+                "GROUP BY date_format(utc_time, 'dd-MM-YYYY') " +
+                "ORDER BY date_format(utc_time, 'dd-MM-YYYY')";
+
+        JSONObject aggregation = getAggregation(query);
+
+        assertThat(aggregation.getJSONObject("order").getString("_key"), is("asc"));
+    }
+
+    @Test
+    @Ignore("https://github.com/opendistro-for-elasticsearch/sql/issues/158")
+    public void groupByWithAndAlias() throws SqlParseException {
+        String query = "SELECT date_format(utc_time, 'dd-MM-YYYY') x, count(*) " +
+                "FROM kibana_sample_data_logs " +
+                "GROUP BY x " +
+                "ORDER BY x";
+
+        JSONObject aggregation = getAggregation(query);
+        assertThat(aggregation.getJSONObject("order").getString("_key"), is("asc"));
+    }
+
+    public JSONObject getAggregation(String query) throws SqlParseException {
+        Select select = getSelect(query);
+
+        Client client = mock(Client.class);
+        AggregationQueryAction queryAction = new AggregationQueryAction(client, select);
+
+        String elasticDsl = queryAction.explain().explain();
+        JSONObject elasticQuery = new JSONObject(elasticDsl);
+
+        JSONObject aggregations = elasticQuery.getJSONObject("aggregations");
+        String dateFormatAggregationKey = getScriptAggregationKey(aggregations, "date_format");
+
+        return aggregations.getJSONObject(dateFormatAggregationKey).getJSONObject("terms");
+    }
+
+    public static String getScriptAggregationKey(JSONObject aggregation, String prefix) {
+        return aggregation.keySet()
+                .stream()
+                .filter(x -> x.startsWith(prefix))
+                .findFirst()
+                .orElseThrow(()-> new RuntimeException("Can't find key" + prefix + " in aggregation " + aggregation));
     }
 
     @Test
@@ -117,6 +210,14 @@ public class DateFormatTest {
             throw new ParserException("Illegal sql: " + sql);
         }
         return (SQLQueryExpr) expr;
+    }
+
+    private Select getSelect(String query) {
+        try {
+            return new SqlParser().parseSelect(parseSql(query));
+        } catch (SqlParseException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private <T, U> Matcher<Iterable<? super T>> hasQueryWithValue(String name, Matcher<? super U> matcher) {

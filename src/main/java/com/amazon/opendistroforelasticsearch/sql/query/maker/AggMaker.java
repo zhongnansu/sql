@@ -15,19 +15,20 @@
 
 package com.amazon.opendistroforelasticsearch.sql.query.maker;
 
-import java.io.IOException;
-import java.math.BigDecimal;
-import java.time.ZoneOffset;
-import java.util.*;
-import java.util.stream.Collectors;
-
+import com.amazon.opendistroforelasticsearch.sql.domain.Condition;
 import com.amazon.opendistroforelasticsearch.sql.domain.Field;
 import com.amazon.opendistroforelasticsearch.sql.domain.KVValue;
 import com.amazon.opendistroforelasticsearch.sql.domain.MethodField;
 import com.amazon.opendistroforelasticsearch.sql.domain.Where;
+import com.amazon.opendistroforelasticsearch.sql.domain.Where.CONN;
+import com.amazon.opendistroforelasticsearch.sql.domain.bucketpath.Path;
 import com.amazon.opendistroforelasticsearch.sql.exception.SqlParseException;
+import com.amazon.opendistroforelasticsearch.sql.parser.ChildrenType;
+import com.amazon.opendistroforelasticsearch.sql.parser.NestedType;
+import com.amazon.opendistroforelasticsearch.sql.utils.Util;
 import com.fasterxml.jackson.core.JsonFactory;
 import org.elasticsearch.common.ParsingException;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.XContentParser;
@@ -41,12 +42,15 @@ import org.elasticsearch.search.aggregations.AggregationBuilder;
 import org.elasticsearch.search.aggregations.AggregationBuilders;
 import org.elasticsearch.search.aggregations.BucketOrder;
 import org.elasticsearch.search.aggregations.InternalOrder;
+import org.elasticsearch.search.aggregations.bucket.filter.FilterAggregationBuilder;
 import org.elasticsearch.search.aggregations.bucket.geogrid.GeoGridAggregationBuilder;
-
-import org.elasticsearch.search.aggregations.bucket.histogram.*;
+import org.elasticsearch.search.aggregations.bucket.histogram.DateHistogramAggregationBuilder;
+import org.elasticsearch.search.aggregations.bucket.histogram.DateHistogramInterval;
+import org.elasticsearch.search.aggregations.bucket.histogram.ExtendedBounds;
+import org.elasticsearch.search.aggregations.bucket.histogram.HistogramAggregationBuilder;
 import org.elasticsearch.search.aggregations.bucket.nested.ReverseNestedAggregationBuilder;
-import org.elasticsearch.search.aggregations.bucket.range.RangeAggregationBuilder;
 import org.elasticsearch.search.aggregations.bucket.range.DateRangeAggregationBuilder;
+import org.elasticsearch.search.aggregations.bucket.range.RangeAggregationBuilder;
 import org.elasticsearch.search.aggregations.bucket.terms.IncludeExclude;
 import org.elasticsearch.search.aggregations.bucket.terms.TermsAggregationBuilder;
 import org.elasticsearch.search.aggregations.metrics.GeoBoundsAggregationBuilder;
@@ -55,13 +59,21 @@ import org.elasticsearch.search.aggregations.metrics.ScriptedMetricAggregationBu
 import org.elasticsearch.search.aggregations.metrics.TopHitsAggregationBuilder;
 import org.elasticsearch.search.aggregations.support.ValuesSourceAggregationBuilder;
 import org.elasticsearch.search.sort.SortOrder;
-import com.amazon.opendistroforelasticsearch.sql.utils.Util;
-import com.amazon.opendistroforelasticsearch.sql.parser.ChildrenType;
-import com.amazon.opendistroforelasticsearch.sql.parser.NestedType;
+
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 public class AggMaker {
 
     private Map<String, KVValue> groupMap = new HashMap<>();
+    private Where where;
 
     /**
      * 分组查的聚合函数
@@ -74,7 +86,8 @@ public class AggMaker {
 
         if (field instanceof MethodField && field.getName().equals("script")) {
             MethodField methodField = (MethodField) field;
-            TermsAggregationBuilder termsBuilder = AggregationBuilders.terms(methodField.getAlias()).script(new Script(methodField.getParams().get(1).value.toString()));
+            TermsAggregationBuilder termsBuilder = AggregationBuilders.terms(methodField.getAlias())
+                    .script(new Script(methodField.getParams().get(1).value.toString()));
             groupMap.put(methodField.getAlias(), new KVValue("KEY", termsBuilder));
             return termsBuilder;
         }
@@ -91,8 +104,9 @@ public class AggMaker {
             }
             return makeRangeGroup(methodField);
         } else {
-            TermsAggregationBuilder termsBuilder = AggregationBuilders.terms(field.getName()).field(field.getName());
-            groupMap.put(field.getName(), new KVValue("KEY", termsBuilder));
+            String termName = (Strings.isNullOrEmpty(field.getAlias())) ? field.getName() : field.getAlias();
+            TermsAggregationBuilder termsBuilder = AggregationBuilders.terms(termName).field(field.getName());
+            groupMap.put(termName, new KVValue("KEY", termsBuilder));
             return termsBuilder;
         }
     }
@@ -145,6 +159,14 @@ public class AggMaker {
         }
     }
 
+    /**
+     * With {@link Where} Condition.
+     */
+    public AggMaker withWhere(Where where) {
+        this.where = where;
+        return this;
+    }
+
     private void addSpecificPercentiles(PercentilesAggregationBuilder percentilesBuilder, List<KVValue> params) {
         List<Double> percentiles = new ArrayList<>();
         for (KVValue kValue : params) {
@@ -153,7 +175,7 @@ public class AggMaker {
                 percentiles.add(percentile.doubleValue());
 
             } else if (kValue.value instanceof Integer) {
-                percentiles.add(((Integer)kValue.value).doubleValue());
+                percentiles.add(((Integer) kValue.value).doubleValue());
             }
         }
         if (percentiles.size() > 0) {
@@ -172,7 +194,8 @@ public class AggMaker {
         return alias.replaceAll("\\[", "(").replaceAll("\\]", ")");
     }
 
-    private AggregationBuilder addFieldToAgg(MethodField field, ValuesSourceAggregationBuilder builder) {
+    private AggregationBuilder addFieldToAgg(MethodField field, ValuesSourceAggregationBuilder builder)
+            throws SqlParseException {
         KVValue kvValue = field.getParams().get(0);
         if (kvValue.key != null && kvValue.key.equals("script")) {
             if (kvValue.value instanceof MethodField) {
@@ -185,31 +208,42 @@ public class AggMaker {
             return builder.script(new Script(kvValue.value.toString()));
         } else if (kvValue.key != null && (kvValue.key.equals("nested") || kvValue.key.equals("reverse_nested"))) {
             NestedType nestedType = (NestedType) kvValue.value;
+            nestedType.addBucketPath(Path.getMetricPath(builder.getName()));
 
-            builder.field(nestedType.field);
+            if (nestedType.isNestedField()) {
+                builder.field("_index");
+            } else {
+                builder.field(nestedType.field);
+            }
 
             AggregationBuilder nestedBuilder;
 
-            String nestedAggName = nestedType.field + "@NESTED";
+            String nestedAggName = nestedType.getNestedAggName();
 
             if (nestedType.isReverse()) {
                 if (nestedType.path != null && nestedType.path.startsWith("~")) {
                     String realPath = nestedType.path.substring(1);
-                    nestedBuilder = AggregationBuilders.nested(nestedAggName,realPath);
+                    nestedBuilder = AggregationBuilders.nested(nestedAggName, realPath);
                     nestedBuilder = nestedBuilder.subAggregation(builder);
-                    return AggregationBuilders.reverseNested(nestedAggName + "_REVERSED").subAggregation(nestedBuilder);
+                    return AggregationBuilders.reverseNested(nestedAggName + "_REVERSED")
+                            .subAggregation(nestedBuilder);
                 } else {
-                    ReverseNestedAggregationBuilder reverseNestedAggregationBuilder = AggregationBuilders.reverseNested(nestedAggName);
-                    if (nestedType.path!=null){
+                    ReverseNestedAggregationBuilder reverseNestedAggregationBuilder =
+                            AggregationBuilders.reverseNested(nestedAggName);
+                    if (nestedType.path != null) {
                         reverseNestedAggregationBuilder.path(nestedType.path);
                     }
                     nestedBuilder = reverseNestedAggregationBuilder;
                 }
             } else {
-                nestedBuilder = AggregationBuilders.nested(nestedAggName,nestedType.path);
+                nestedBuilder = AggregationBuilders.nested(nestedAggName, nestedType.path);
             }
 
-            return nestedBuilder.subAggregation(builder);
+            AggregationBuilder aggregation = nestedBuilder.subAggregation(wrapWithFilterAgg(
+                    nestedType,
+                    builder));
+            nestedType.addBucketPath(Path.getAggPath(nestedBuilder.getName()));
+            return aggregation;
         } else if (kvValue.key != null && (kvValue.key.equals("children"))) {
             ChildrenType childrenType = (ChildrenType) kvValue.value;
 
@@ -219,7 +253,7 @@ public class AggMaker {
 
             String childrenAggName = childrenType.field + "@CHILDREN";
 
-            childrenBuilder = JoinAggregationBuilders.children(childrenAggName,childrenType.childType);
+            childrenBuilder = JoinAggregationBuilders.children(childrenAggName, childrenType.childType);
 
             return childrenBuilder;
         }
@@ -234,7 +268,6 @@ public class AggMaker {
             case "date_histogram":
                 return dateHistogram(field);
             case "date_range":
-                return dateRange(field);
             case "month":
                 return dateRange(field);
             case "histogram":
@@ -254,7 +287,7 @@ public class AggMaker {
     private AggregationBuilder geoBounds(MethodField field) throws SqlParseException {
         String aggName = gettAggNameFromParamsOrAlias(field);
         GeoBoundsAggregationBuilder boundsBuilder = AggregationBuilders.geoBounds(aggName);
-        String value = null;
+        String value;
         for (KVValue kv : field.getParams()) {
             value = kv.value.toString();
             switch (kv.key.toLowerCase()) {
@@ -279,11 +312,11 @@ public class AggMaker {
     private AggregationBuilder termsAgg(MethodField field) throws SqlParseException {
         String aggName = gettAggNameFromParamsOrAlias(field);
         TermsAggregationBuilder terms = AggregationBuilders.terms(aggName);
-        String value = null;
+        String value;
         IncludeExclude include = null, exclude = null;
         for (KVValue kv : field.getParams()) {
-            if(kv.value.toString().contains("doc[")) {
-                String script = kv.value +  "; return " + kv.key;
+            if (kv.value.toString().contains("doc[")) {
+                String script = kv.value + "; return " + kv.key;
                 terms.script(new Script(script));
             } else {
                 value = kv.value.toString();
@@ -310,16 +343,20 @@ public class AggMaker {
                             terms.order(BucketOrder.key(false));
                         } else {
                             List<BucketOrder> orderElements = new ArrayList<>();
-                            try (JsonXContentParser parser = new JsonXContentParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, new JsonFactory().createParser(value))) {
+                            try (JsonXContentParser parser = new JsonXContentParser(NamedXContentRegistry.EMPTY,
+                                    LoggingDeprecationHandler.INSTANCE, new JsonFactory().createParser(value))) {
                                 XContentParser.Token currentToken = parser.nextToken();
                                 if (currentToken == XContentParser.Token.START_OBJECT) {
                                     orderElements.add(InternalOrder.Parser.parseOrderParam(parser));
                                 } else if (currentToken == XContentParser.Token.START_ARRAY) {
-                                    for (currentToken = parser.nextToken(); currentToken != XContentParser.Token.END_ARRAY; currentToken = parser.nextToken()) {
+                                    for (currentToken = parser.nextToken();
+                                         currentToken != XContentParser.Token.END_ARRAY;
+                                         currentToken = parser.nextToken()) {
                                         if (currentToken == XContentParser.Token.START_OBJECT) {
                                             orderElements.add(InternalOrder.Parser.parseOrderParam(parser));
                                         } else {
-                                            throw new ParsingException(parser.getTokenLocation(), "Invalid token in order array");
+                                            throw new ParsingException(parser.getTokenLocation(),
+                                                    "Invalid token in order array");
                                         }
                                     }
                                 }
@@ -338,7 +375,8 @@ public class AggMaker {
                         terms.executionHint(value);
                         break;
                     case "include":
-                        try (XContentParser parser = JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, value)) {
+                        try (XContentParser parser = JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY,
+                                LoggingDeprecationHandler.INSTANCE, value)) {
                             parser.nextToken();
                             include = IncludeExclude.parseInclude(parser);
                         } catch (IOException e) {
@@ -346,7 +384,8 @@ public class AggMaker {
                         }
                         break;
                     case "exclude":
-                        try (XContentParser parser = JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, value)) {
+                        try (XContentParser parser = JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY,
+                                LoggingDeprecationHandler.INSTANCE, value)) {
                             parser.nextToken();
                             exclude = IncludeExclude.parseExclude(parser);
                         } catch (IOException e) {
@@ -366,8 +405,10 @@ public class AggMaker {
         String aggName = gettAggNameFromParamsOrAlias(field);
         ScriptedMetricAggregationBuilder scriptedMetricBuilder = AggregationBuilders.scriptedMetric(aggName);
         Map<String, Object> scriptedMetricParams = field.getParamsAsMap();
-        if (!scriptedMetricParams.containsKey("map_script") && !scriptedMetricParams.containsKey("map_script_id") && !scriptedMetricParams.containsKey("map_script_file")) {
-            throw new SqlParseException("scripted metric parameters must contain map_script/map_script_id/map_script_file parameter");
+        if (!scriptedMetricParams.containsKey("map_script") && !scriptedMetricParams.containsKey("map_script_id")
+                && !scriptedMetricParams.containsKey("map_script_file")) {
+            throw new SqlParseException(
+                    "scripted metric parameters must contain map_script/map_script_id/map_script_file parameter");
         }
         HashMap<String, Object> scriptAdditionalParams = new HashMap<>();
         HashMap<String, Object> reduceScriptAdditionalParams = new HashMap<>();
@@ -375,7 +416,8 @@ public class AggMaker {
             String paramValue = param.getValue().toString();
             if (param.getKey().startsWith("@")) {
                 if (param.getKey().startsWith("@reduce_")) {
-                    reduceScriptAdditionalParams.put(param.getKey().replace("@reduce_", ""), param.getValue());
+                    reduceScriptAdditionalParams.put(param.getKey().replace("@reduce_", ""),
+                            param.getValue());
                 } else {
                     scriptAdditionalParams.put(param.getKey().replace("@", ""), param.getValue());
                 }
@@ -387,25 +429,30 @@ public class AggMaker {
                     scriptedMetricBuilder.mapScript(new Script(paramValue));
                     break;
                 case "map_script_id":
-                    scriptedMetricBuilder.mapScript(new Script(ScriptType.STORED, Script.DEFAULT_SCRIPT_LANG,paramValue, new HashMap<String, Object>()));
+                    scriptedMetricBuilder.mapScript(new Script(ScriptType.STORED, Script.DEFAULT_SCRIPT_LANG,
+                            paramValue, new HashMap<>()));
                     break;
                 case "init_script":
                     scriptedMetricBuilder.initScript(new Script(paramValue));
                     break;
                 case "init_script_id":
-                    scriptedMetricBuilder.initScript(new Script(ScriptType.STORED,Script.DEFAULT_SCRIPT_LANG,paramValue, new HashMap<String, Object>()));
+                    scriptedMetricBuilder.initScript(new Script(ScriptType.STORED, Script.DEFAULT_SCRIPT_LANG,
+                            paramValue, new HashMap<>()));
                     break;
                 case "combine_script":
                     scriptedMetricBuilder.combineScript(new Script(paramValue));
                     break;
                 case "combine_script_id":
-                    scriptedMetricBuilder.combineScript(new Script(ScriptType.STORED, Script.DEFAULT_SCRIPT_LANG,paramValue, new HashMap<String, Object>()));
+                    scriptedMetricBuilder.combineScript(new Script(ScriptType.STORED, Script.DEFAULT_SCRIPT_LANG,
+                            paramValue, new HashMap<>()));
                     break;
                 case "reduce_script":
-                    scriptedMetricBuilder.reduceScript(new Script(ScriptType.INLINE,  Script.DEFAULT_SCRIPT_LANG , paramValue, reduceScriptAdditionalParams));
+                    scriptedMetricBuilder.reduceScript(new Script(ScriptType.INLINE, Script.DEFAULT_SCRIPT_LANG,
+                            paramValue, reduceScriptAdditionalParams));
                     break;
                 case "reduce_script_id":
-                    scriptedMetricBuilder.reduceScript(new Script(ScriptType.STORED,  Script.DEFAULT_SCRIPT_LANG,paramValue, reduceScriptAdditionalParams));
+                    scriptedMetricBuilder.reduceScript(new Script(ScriptType.STORED, Script.DEFAULT_SCRIPT_LANG,
+                            paramValue, reduceScriptAdditionalParams));
                     break;
                 case "alias":
                 case "nested":
@@ -427,7 +474,7 @@ public class AggMaker {
     private AggregationBuilder geohashGrid(MethodField field) throws SqlParseException {
         String aggName = gettAggNameFromParamsOrAlias(field);
         GeoGridAggregationBuilder geoHashGrid = AggregationBuilders.geohashGrid(aggName);
-        String value = null;
+        String value;
         for (KVValue kv : field.getParams()) {
             value = kv.value.toString();
             switch (kv.key.toLowerCase()) {
@@ -461,28 +508,21 @@ public class AggMaker {
         String alias = gettAggNameFromParamsOrAlias(field);
         DateRangeAggregationBuilder dateRange = AggregationBuilders.dateRange(alias).format(TIME_FARMAT);
 
-        String value = null;
+        String value;
         List<String> ranges = new ArrayList<>();
         for (KVValue kv : field.getParams()) {
             value = kv.value.toString();
             if ("field".equals(kv.key)) {
                 dateRange.field(value);
-                continue;
             } else if ("format".equals(kv.key)) {
                 dateRange.format(value);
-                continue;
             } else if ("time_zone".equals(kv.key)) {
                 dateRange.timeZone(ZoneOffset.of(value));
-                continue;
             } else if ("from".equals(kv.key)) {
                 dateRange.addUnboundedFrom(kv.value.toString());
-                continue;
             } else if ("to".equals(kv.key)) {
                 dateRange.addUnboundedTo(kv.value.toString());
-                continue;
-            } else if ("alias".equals(kv.key) || "nested".equals(kv.key) || "children".equals(kv.key)) {
-                continue;
-            } else {
+            } else if (!"alias".equals(kv.key) && !"nested".equals(kv.key) && !"children".equals(kv.key)) {
                 ranges.add(value);
             }
         }
@@ -504,16 +544,19 @@ public class AggMaker {
     private DateHistogramAggregationBuilder dateHistogram(MethodField field) throws SqlParseException {
         String alias = gettAggNameFromParamsOrAlias(field);
         DateHistogramAggregationBuilder dateHistogram = AggregationBuilders.dateHistogram(alias).format(TIME_FARMAT);
-        String value = null;
+        String value;
         for (KVValue kv : field.getParams()) {
-            if(kv.value.toString().contains("doc[")) {
-                String script = kv.value +  "; return " + kv.key;
+            if (kv.value.toString().contains("doc[")) {
+                String script = kv.value + "; return " + kv.key;
                 dateHistogram.script(new Script(script));
             } else {
                 value = kv.value.toString();
                 switch (kv.key.toLowerCase()) {
                     case "interval":
                         dateHistogram.dateHistogramInterval(new DateHistogramInterval(kv.value.toString()));
+                        break;
+                    case "fixed_interval":
+                        dateHistogram.fixedInterval(new DateHistogramInterval(kv.value.toString()));
                         break;
                     case "field":
                         dateHistogram.field(value);
@@ -528,7 +571,8 @@ public class AggMaker {
                         dateHistogram.minDocCount(Long.parseLong(value));
                         break;
                     case "order":
-                        dateHistogram.order("desc".equalsIgnoreCase(value) ? BucketOrder.key(false) : BucketOrder.key(true));
+                        dateHistogram.order("desc".equalsIgnoreCase(value) ? BucketOrder.key(false) :
+                                BucketOrder.key(true));
                         break;
                     case "extended_bounds":
                         String[] bounds = value.split(":");
@@ -553,8 +597,9 @@ public class AggMaker {
     private String gettAggNameFromParamsOrAlias(MethodField field) {
         String alias = field.getAlias();
         for (KVValue kv : field.getParams()) {
-            if (kv.key != null && kv.key.equals("alias"))
+            if (kv.key != null && kv.key.equals("alias")) {
                 alias = kv.value.toString();
+            }
         }
         return alias;
     }
@@ -562,10 +607,10 @@ public class AggMaker {
     private HistogramAggregationBuilder histogram(MethodField field) throws SqlParseException {
         String aggName = gettAggNameFromParamsOrAlias(field);
         HistogramAggregationBuilder histogram = AggregationBuilders.histogram(aggName);
-        String value = null;
+        String value;
         for (KVValue kv : field.getParams()) {
-            if(kv.value.toString().contains("doc[")) {
-                String script = kv.value +  "; return " + kv.key;
+            if (kv.value.toString().contains("doc[")) {
+                String script = kv.value + "; return " + kv.key;
                 histogram.script(new Script(script));
             } else {
                 value = kv.value.toString();
@@ -581,8 +626,9 @@ public class AggMaker {
                         break;
                     case "extended_bounds":
                         String[] bounds = value.split(":");
-                        if (bounds.length == 2)
+                        if (bounds.length == 2) {
                             histogram.extendedBounds(Long.valueOf(bounds[0]), Long.valueOf(bounds[1]));
+                        }
                         break;
                     case "alias":
                     case "nested":
@@ -590,7 +636,7 @@ public class AggMaker {
                     case "children":
                         break;
                     case "order":
-                        BucketOrder order = null;
+                        final BucketOrder order;
                         switch (value) {
                             case "key_desc":
                                 order = BucketOrder.key(false);
@@ -625,7 +671,8 @@ public class AggMaker {
     private RangeAggregationBuilder rangeBuilder(MethodField field) {
 
         // ignore alias param
-        LinkedList<KVValue> params = field.getParams().stream().filter(kv -> !"alias".equals(kv.key)).collect(Collectors.toCollection(LinkedList::new));
+        LinkedList<KVValue> params = field.getParams().stream().filter(kv -> !"alias".equals(kv.key))
+                .collect(Collectors.toCollection(LinkedList::new));
 
         String fieldName = params.poll().toString();
 
@@ -653,10 +700,12 @@ public class AggMaker {
         if ("DISTINCT".equals(field.getOption())) {
 
             if (field.getParams().size() == 1) {
-                return AggregationBuilders.cardinality(field.getAlias()).field(field.getParams().get(0).value.toString());
+                return AggregationBuilders.cardinality(field.getAlias()).field(field.getParams().get(0).value
+                        .toString());
             } else {
                 Integer precision_threshold = (Integer) (field.getParams().get(1).value);
-                return AggregationBuilders.cardinality(field.getAlias()).precisionThreshold(precision_threshold).field(field.getParams().get(0).value.toString());
+                return AggregationBuilders.cardinality(field.getAlias()).precisionThreshold(precision_threshold)
+                        .field(field.getParams().get(0).value.toString());
             }
 
         }
@@ -719,4 +768,40 @@ public class AggMaker {
         return this.groupMap;
     }
 
+    /**
+     * Wrap the Metric Aggregation with Filter Aggregation if necessary.
+     * The Filter Aggregation condition is constructed from the nested condition in where clause.
+     */
+    private AggregationBuilder wrapWithFilterAgg(NestedType nestedType, ValuesSourceAggregationBuilder builder)
+            throws SqlParseException {
+        if (where != null && where.getWheres() != null) {
+            List<Condition> nestedConditionList = where.getWheres().stream()
+                    .filter(condition -> condition instanceof Condition)
+                    .map(condition -> (Condition) condition)
+                    .filter(condition -> condition.isNestedComplex()
+                                         || nestedType.path.equalsIgnoreCase(condition.getNestedPath()))
+                    // ignore the OR condition on nested field.
+                    .filter(condition -> CONN.AND.equals(condition.getConn()))
+                    .collect(Collectors.toList());
+            if (!nestedConditionList.isEmpty()) {
+                Where filterWhere = new Where(where.getConn());
+                nestedConditionList.forEach(condition -> {
+                    if (condition.isNestedComplex()) {
+                        ((Where) condition.getValue()).getWheres().forEach(filterWhere::addWhere);
+                    } else {
+                        // Since the filter condition is used inside Nested Aggregation,remove the nested attribute.
+                        condition.setNested(false);
+                        condition.setNestedPath("");
+                        filterWhere.addWhere(condition);
+                    }
+                });
+                FilterAggregationBuilder filterAgg = AggregationBuilders.filter(
+                        nestedType.getFilterAggName(),
+                        QueryMaker.explain(filterWhere));
+                nestedType.addBucketPath(Path.getAggPath(filterAgg.getName()));
+                return filterAgg.subAggregation(builder);
+            }
+        }
+        return builder;
+    }
 }

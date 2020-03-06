@@ -17,10 +17,14 @@ package com.amazon.opendistroforelasticsearch.sql.domain;
 
 import com.alibaba.druid.sql.ast.SQLExpr;
 import com.alibaba.druid.sql.ast.statement.SQLSelectGroupByClause;
+import com.alibaba.druid.util.StringUtils;
 import com.amazon.opendistroforelasticsearch.sql.exception.SqlParseException;
+import com.amazon.opendistroforelasticsearch.sql.parser.HavingParser;
+import com.amazon.opendistroforelasticsearch.sql.parser.NestedType;
+import com.amazon.opendistroforelasticsearch.sql.parser.WhereParser;
+import com.google.common.collect.Iterables;
 import org.elasticsearch.script.Script;
 import org.elasticsearch.search.aggregations.AggregationBuilder;
-import com.amazon.opendistroforelasticsearch.sql.parser.WhereParser;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -33,10 +37,10 @@ import static org.elasticsearch.search.aggregations.PipelineAggregatorBuilders.b
 
 /**
  * Domain object for HAVING clause in SQL which covers both the parsing and explain logic.
- *
+ * <p>
  * Responsibilities:
- *  1. Parsing: parse conditions out during initialization
- *  2. Explain: translate conditions to ES query DSL (Bucket Selector Aggregation)
+ * 1. Parsing: parse conditions out during initialization
+ * 2. Explain: translate conditions to ES query DSL (Bucket Selector Aggregation)
  */
 public class Having {
 
@@ -50,20 +54,33 @@ public class Having {
      */
     private final List<Where> conditions;
 
+    private HavingParser havingParser;
+
+    public List<Field> getHavingFields() {
+        return havingParser.getHavingFields();
+    }
+
     /**
      * Construct by HAVING expression
-     * @param havingExpr         having expression
-     * @param parser             where parser
+     *
+     * @param havingExpr having expression
+     * @param parser     where parser
      * @throws SqlParseException exception thrown by where parser
      */
     public Having(SQLExpr havingExpr, WhereParser parser) throws SqlParseException {
-        this.conditions = parseHavingExprToConditions(havingExpr, parser);
+        havingParser = new HavingParser(parser);
+        conditions = parseHavingExprToConditions(havingExpr, havingParser);
+    }
+
+    public List<Where> getConditions() {
+        return conditions;
     }
 
     /**
      * Construct by GROUP BY expression with null check
-     * @param groupByExpr        group by expression
-     * @param parser             where parser
+     *
+     * @param groupByExpr group by expression
+     * @param parser      where parser
      * @throws SqlParseException exception thrown by where parser
      */
     public Having(SQLSelectGroupByClause groupByExpr, WhereParser parser) throws SqlParseException {
@@ -74,8 +91,8 @@ public class Having {
      * Add Bucket Selector Aggregation under group by aggregation with sibling of aggregation of fields in SELECT.
      * ES makes sure that all sibling runs before bucket selector aggregation.
      *
-     * @param groupByAgg         aggregation builder for GROUP BY clause
-     * @param fields             fields in SELECT clause
+     * @param groupByAgg aggregation builder for GROUP BY clause
+     * @param fields     fields in SELECT clause
      * @throws SqlParseException exception thrown for unknown expression
      */
     public void explain(AggregationBuilder groupByAgg, List<Field> fields) throws SqlParseException {
@@ -83,12 +100,13 @@ public class Having {
             return;
         }
 
+        // parsing the fields from SELECT and HAVING clause
         groupByAgg.subAggregation(bucketSelector(BUCKET_SELECTOR_NAME,
-                                                 contextForFieldsInSelect(fields),
-                                                 explainConditions()));
+                contextForFieldsInSelect(Iterables.concat(fields, getHavingFields())),
+                explainConditions()));
     }
 
-    private List<Where> parseHavingExprToConditions(SQLExpr havingExpr, WhereParser parser)
+    private List<Where> parseHavingExprToConditions(SQLExpr havingExpr, HavingParser parser)
             throws SqlParseException {
         if (havingExpr == null) {
             return Collections.emptyList();
@@ -99,12 +117,12 @@ public class Having {
         return where.getWheres();
     }
 
-    private Map<String, String> contextForFieldsInSelect(List<Field> fields) {
+    private Map<String, String> contextForFieldsInSelect(Iterable<Field> fields) {
         Map<String, String> context = new HashMap<>();
         for (Field field : fields) {
             if (field instanceof MethodField) {
                 // It's required to add to context even if alias in SELECT is exactly same name as that in script
-                context.put(field.getAlias(), field.getAlias());
+                context.put(field.getAlias(), bucketsPath(field.getAlias(), ((MethodField) field).getParams()));
             }
         }
         return context;
@@ -117,22 +135,22 @@ public class Having {
     /**
      * Explain conditions recursively.
      * Example: HAVING c >= 2 OR NOT (a > 20 AND c <= 10 OR a < 1) OR a < 5
-     *          Object: Where(?:
-     *                  [
-     *                    Condition(?:c>=2),
-     *                    Where(or:
-     *                    [
-     *                      Where(?:a<=20), Where(or:c>10), Where(and:a>=1)],
-     *                    ]),
-     *                    Condition(or:a<5)
-     *                  ])
-     *
+     * Object: Where(?:
+     * [
+     * Condition(?:c>=2),
+     * Where(or:
+     * [
+     * Where(?:a<=20), Where(or:c>10), Where(and:a>=1)],
+     * ]),
+     * Condition(or:a<5)
+     * ])
+     * <p>
      * Note: a) Where(connector : condition expression).
-     *       b) Condition is a subclass of Where.
-     *       c) connector=? means it doesn't matter for first condition in the list
+     * b) Condition is a subclass of Where.
+     * c) connector=? means it doesn't matter for first condition in the list
      *
-     * @param wheres             conditions
-     * @return                   painless script string
+     * @param wheres conditions
+     * @return painless script string
      * @throws SqlParseException unknown type of expression other than identifier and value
      */
     private String doExplain(List<Where> wheres) throws SqlParseException {
@@ -150,8 +168,8 @@ public class Having {
                 script.append(createScript((Condition) cond));
             } else {
                 script.append('(').
-                       append(doExplain(cond.getWheres())).
-                       append(')');
+                        append(doExplain(cond.getWheres())).
+                        append(')');
             }
         }
         return script.toString();
@@ -181,12 +199,12 @@ public class Having {
             }
             case IN:
                 return Arrays.stream((Object[]) value).
-                              map(val -> expr(name, "==", val)).
-                              collect(joining(OR));
+                        map(val -> expr(name, "==", val)).
+                        collect(joining(OR));
             case NIN:
                 return Arrays.stream((Object[]) value).
-                              map(val -> expr(name, "!=", val)).
-                              collect(joining(AND));
+                        map(val -> expr(name, "!=", val)).
+                        collect(joining(AND));
             default:
                 throw new SqlParseException("Unsupported operation in HAVING clause: " + cond.getOpear());
         }
@@ -196,4 +214,19 @@ public class Having {
         return String.join(" ", PARAMS + name, operator, value.toString());
     }
 
+    /**
+     * Build the buckets_path.
+     * If the field is nested field, using the bucket path.
+     * else using the alias.
+     */
+    private String bucketsPath(String alias, List<KVValue> kvValueList) {
+        if (kvValueList.size() == 1) {
+            KVValue kvValue = kvValueList.get(0);
+            if (StringUtils.equals(kvValue.key, "nested")
+                && kvValue.value instanceof NestedType) {
+                return ((NestedType) kvValue.value).getBucketPath();
+            }
+        }
+        return alias;
+    }
 }

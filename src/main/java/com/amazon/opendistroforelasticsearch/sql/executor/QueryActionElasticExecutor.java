@@ -15,14 +15,12 @@
 
 package com.amazon.opendistroforelasticsearch.sql.executor;
 
+import com.amazon.opendistroforelasticsearch.sql.exception.SqlParseException;
 import com.amazon.opendistroforelasticsearch.sql.executor.join.ElasticJoinExecutor;
 import com.amazon.opendistroforelasticsearch.sql.executor.multi.MultiRequestExecutorFactory;
-import org.elasticsearch.action.ActionResponse;
-import org.elasticsearch.action.search.SearchResponse;
-import org.elasticsearch.client.Client;
-import org.elasticsearch.search.SearchHits;
-import org.elasticsearch.search.aggregations.Aggregations;
-import com.amazon.opendistroforelasticsearch.sql.exception.SqlParseException;
+import com.amazon.opendistroforelasticsearch.sql.executor.adapter.QueryPlanQueryAction;
+import com.amazon.opendistroforelasticsearch.sql.executor.adapter.QueryPlanRequestBuilder;
+import com.amazon.opendistroforelasticsearch.sql.expression.domain.BindingTuple;
 import com.amazon.opendistroforelasticsearch.sql.query.AggregationQueryAction;
 import com.amazon.opendistroforelasticsearch.sql.query.DefaultQueryAction;
 import com.amazon.opendistroforelasticsearch.sql.query.DeleteQueryAction;
@@ -34,28 +32,41 @@ import com.amazon.opendistroforelasticsearch.sql.query.SqlElasticSearchRequestBu
 import com.amazon.opendistroforelasticsearch.sql.query.join.ESJoinQueryAction;
 import com.amazon.opendistroforelasticsearch.sql.query.multi.MultiQueryAction;
 import com.amazon.opendistroforelasticsearch.sql.query.multi.MultiQueryRequestBuilder;
+import org.elasticsearch.action.ActionResponse;
+import org.elasticsearch.action.search.SearchResponse;
+import org.elasticsearch.client.Client;
+import org.elasticsearch.search.SearchHits;
+import org.elasticsearch.search.aggregations.Aggregations;
 
 import java.io.IOException;
+import java.util.List;
 
 /**
  * Created by Eliran on 3/10/2015.
  */
 public class QueryActionElasticExecutor {
     public static SearchHits executeSearchAction(DefaultQueryAction searchQueryAction) throws SqlParseException {
-        SqlElasticSearchRequestBuilder builder  =  searchQueryAction.explain();
+        SqlElasticSearchRequestBuilder builder = searchQueryAction.explain();
         return ((SearchResponse) builder.get()).getHits();
     }
 
-    public static SearchHits executeJoinSearchAction(Client client , ESJoinQueryAction joinQueryAction) throws IOException, SqlParseException {
+    public static SearchHits executeJoinSearchAction(Client client, ESJoinQueryAction joinQueryAction)
+            throws IOException, SqlParseException {
         SqlElasticRequestBuilder joinRequestBuilder = joinQueryAction.explain();
-        ElasticJoinExecutor executor = ElasticJoinExecutor.createJoinExecutor(client,joinRequestBuilder);
+        ElasticJoinExecutor executor = ElasticJoinExecutor.createJoinExecutor(client, joinRequestBuilder);
         executor.run();
         return executor.getHits();
     }
 
-    public static Aggregations executeAggregationAction(AggregationQueryAction aggregationQueryAction) throws SqlParseException {
-        SqlElasticSearchRequestBuilder select =  aggregationQueryAction.explain();
-        return ((SearchResponse)select.get()).getAggregations();
+    public static Aggregations executeAggregationAction(AggregationQueryAction aggregationQueryAction)
+            throws SqlParseException {
+        SqlElasticSearchRequestBuilder select = aggregationQueryAction.explain();
+        return ((SearchResponse) select.get()).getAggregations();
+    }
+
+    public static List<BindingTuple> executeQueryPlanQueryAction(QueryPlanQueryAction queryPlanQueryAction) {
+        QueryPlanRequestBuilder select = (QueryPlanRequestBuilder) queryPlanQueryAction.explain();
+        return select.execute();
     }
 
     public static ActionResponse executeShowQueryAction(ShowQueryAction showQueryAction) {
@@ -70,30 +81,41 @@ public class QueryActionElasticExecutor {
         return deleteQueryAction.explain().get();
     }
 
-    public static SearchHits executeMultiQueryAction(Client client, MultiQueryAction queryAction) throws SqlParseException, IOException {
+    public static SearchHits executeMultiQueryAction(Client client, MultiQueryAction queryAction)
+            throws SqlParseException, IOException {
         SqlElasticRequestBuilder multiRequestBuilder = queryAction.explain();
-        ElasticHitsExecutor executor = MultiRequestExecutorFactory.createExecutor(client, (MultiQueryRequestBuilder) multiRequestBuilder);
+        ElasticHitsExecutor executor = MultiRequestExecutorFactory.createExecutor(client,
+                (MultiQueryRequestBuilder) multiRequestBuilder);
         executor.run();
         return executor.getHits();
     }
 
-    public static Object executeAnyAction(Client client, QueryAction queryAction) throws SqlParseException, IOException {
-        if (queryAction instanceof DefaultQueryAction)
+    public static Object executeAnyAction(Client client, QueryAction queryAction)
+            throws SqlParseException, IOException {
+        if (queryAction instanceof DefaultQueryAction) {
             return executeSearchAction((DefaultQueryAction) queryAction);
-        if (queryAction instanceof AggregationQueryAction)
+        }
+        if (queryAction instanceof AggregationQueryAction) {
             return executeAggregationAction((AggregationQueryAction) queryAction);
-        if (queryAction instanceof ShowQueryAction)
+        }
+        if (queryAction instanceof QueryPlanQueryAction) {
+            return executeQueryPlanQueryAction((QueryPlanQueryAction) queryAction);
+        }
+        if (queryAction instanceof ShowQueryAction) {
             return executeShowQueryAction((ShowQueryAction) queryAction);
-        if (queryAction instanceof DescribeQueryAction)
+        }
+        if (queryAction instanceof DescribeQueryAction) {
             return executeDescribeQueryAction((DescribeQueryAction) queryAction);
-        if (queryAction instanceof ESJoinQueryAction)
+        }
+        if (queryAction instanceof ESJoinQueryAction) {
             return executeJoinSearchAction(client, (ESJoinQueryAction) queryAction);
-        if (queryAction instanceof MultiQueryAction)
+        }
+        if (queryAction instanceof MultiQueryAction) {
             return executeMultiQueryAction(client, (MultiQueryAction) queryAction);
-        if (queryAction instanceof DeleteQueryAction )
+        }
+        if (queryAction instanceof DeleteQueryAction) {
             return executeDeleteAction((DeleteQueryAction) queryAction);
+        }
         return null;
     }
-
-
 }

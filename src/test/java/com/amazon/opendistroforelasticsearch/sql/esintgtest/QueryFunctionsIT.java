@@ -15,6 +15,7 @@
 
 package com.amazon.opendistroforelasticsearch.sql.esintgtest;
 
+import com.amazon.opendistroforelasticsearch.sql.utils.StringUtils;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
@@ -48,9 +49,9 @@ import static org.hamcrest.Matchers.startsWith;
 public class QueryFunctionsIT extends SQLIntegTestCase {
 
     private static final String SELECT_ALL = "SELECT *";
-    private static final String FROM_ACCOUNTS = "FROM " + TEST_INDEX_ACCOUNT + "/account";
-    private static final String FROM_NESTED = "FROM " + TEST_INDEX_NESTED_TYPE + "/nestedType";
-    private static final String FROM_PHRASE = "FROM " + TEST_INDEX_PHRASE + "/phrase";
+    private static final String FROM_ACCOUNTS = "FROM " + TEST_INDEX_ACCOUNT;
+    private static final String FROM_NESTED = "FROM " + TEST_INDEX_NESTED_TYPE;
+    private static final String FROM_PHRASE = "FROM " + TEST_INDEX_PHRASE;
 
     /**
      * TODO Looks like Math/Date Functions test all use the same query() and execute() functions
@@ -174,7 +175,7 @@ public class QueryFunctionsIT extends SQLIntegTestCase {
             query(
                 "SELECT firstname",
                 FROM_ACCOUNTS,
-                "WHERE MULTI_MATCH(query='Ayers', fields='firstname')"
+                "WHERE MULTI_MATCH('query'='Ayers', 'fields'='firstname')"
             ),
             hits(
                 hasValueForFields("Ayers", "firstname")
@@ -188,11 +189,24 @@ public class QueryFunctionsIT extends SQLIntegTestCase {
             query(
                 "SELECT firstname, lastname",
                 FROM_ACCOUNTS,
-                "WHERE MULTI_MATCH(query='Bradshaw', fields='*name')"
+                "WHERE MULTI_MATCH('query'='Bradshaw', 'fields'='*name')"
             ),
             hits(
                 hasValueForFields("Bradshaw", "firstname", "lastname")
             )
+        );
+    }
+
+    @Test
+    public void numberLiteralInSelectField() {
+        assertTrue(
+                executeQuery(StringUtils.format("SELECT 234234 AS number from %s", TEST_INDEX_ACCOUNT), "jdbc")
+                .contains("234234")
+        );
+
+        assertTrue(
+                executeQuery(StringUtils.format("SELECT 2.34234 AS number FROM %s", TEST_INDEX_ACCOUNT), "jdbc")
+                .contains("2.34234")
         );
     }
 

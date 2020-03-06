@@ -35,30 +35,32 @@ public class RollingCounter implements Counter<Long> {
     private final LongAdder count;
 
     public RollingCounter() {
-
         this(LocalClusterState.state().getSettingValue(SqlSettings.METRICS_ROLLING_WINDOW),
                 LocalClusterState.state().getSettingValue(SqlSettings.METRICS_ROLLING_INTERVAL));
     }
 
-    public RollingCounter(long window, long interval) {
+    public RollingCounter(long window, long interval, Clock clock) {
         this.window = window;
         this.interval = interval;
-        clock = Clock.systemDefaultZone();
+        this.clock = clock;
         time2CountWin = new ConcurrentSkipListMap<>();
         count = new LongAdder();
         capacity = window / interval * 2;
     }
 
+    public RollingCounter(long window, long interval) {
+        this(window, interval, Clock.systemDefaultZone());
+    }
+
     @Override
     public void increment() {
-
         add(1L);
     }
 
     @Override
     public void add(long n) {
         trim();
-        time2CountWin.compute(getKey(clock.millis()), (k, v) -> (v == null) ? n : v+n);
+        time2CountWin.compute(getKey(clock.millis()), (k, v) -> (v == null) ? n : v + n);
     }
 
     @Override
@@ -68,7 +70,9 @@ public class RollingCounter implements Counter<Long> {
 
     public long getValue(long key) {
         Long res = time2CountWin.get(key);
-        if (res == null) return 0;
+        if (res == null) {
+            return 0;
+        }
 
         return res;
     }

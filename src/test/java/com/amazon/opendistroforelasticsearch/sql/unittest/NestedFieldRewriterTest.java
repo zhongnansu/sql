@@ -27,14 +27,13 @@ import com.alibaba.druid.sql.ast.statement.SQLSelectQueryBlock;
 import com.alibaba.druid.sql.ast.statement.SQLTableSource;
 import com.alibaba.druid.sql.ast.statement.SQLUnionQuery;
 import com.alibaba.druid.sql.dialect.mysql.ast.expr.MySqlSelectGroupByExpr;
-import com.alibaba.druid.sql.parser.ParserException;
-import com.alibaba.druid.sql.parser.Token;
 import com.amazon.opendistroforelasticsearch.sql.rewriter.nestedfield.NestedFieldRewriter;
-import com.amazon.opendistroforelasticsearch.sql.parser.ElasticSqlExprParser;
+import com.amazon.opendistroforelasticsearch.sql.util.SqlParserUtils;
 import org.junit.Test;
 
 import java.util.List;
 
+import static com.amazon.opendistroforelasticsearch.sql.util.SqlParserUtils.parse;
 import static java.util.stream.IntStream.range;
 import static org.junit.Assert.assertEquals;
 
@@ -58,7 +57,7 @@ public class NestedFieldRewriterTest {
     public void selectAll() {
         same(
             query("SELECT * FROM team t, t.employees"),
-            query("SELECT *, nested(employees.*) FROM team")
+            query("SELECT *, nested(employees.*, 'employees') FROM team")
         );
     }
 
@@ -66,7 +65,7 @@ public class NestedFieldRewriterTest {
     public void selectAllWithGroupBy() {
         same(
             query("SELECT * FROM team t, t.employees e GROUP BY e.firstname"),
-            query("SELECT * FROM team GROUP BY nested(employees.firstname)")
+            query("SELECT * FROM team GROUP BY nested(employees.firstname, 'employees')")
         );
     }
 
@@ -74,7 +73,7 @@ public class NestedFieldRewriterTest {
     public void selectAllWithCondition() {
         same(
             query("SELECT * FROM team t, t.employees e WHERE e.age = 26"),
-            query("SELECT *, nested(employees.*) FROM team WHERE nested(employees.age) = 26")
+            query("SELECT *, nested(employees.*, 'employees') FROM team WHERE nested(employees.age, 'employees') = 26")
         );
     }
 
@@ -82,7 +81,7 @@ public class NestedFieldRewriterTest {
     public void singleCondition() {
         same(
             query("SELECT region FROM team t, t.employees e WHERE e.age = 26"),
-            query("SELECT region FROM team WHERE nested(employees.age) = 26")
+            query("SELECT region FROM team WHERE nested(employees.age, 'employees') = 26")
         );
     }
 
@@ -90,7 +89,7 @@ public class NestedFieldRewriterTest {
     public void mixedWithObjectType() {
         same(
             query("SELECT region FROM team t, t.employees e WHERE e.age > 30 OR manager.age = 50"),
-            query("SELECT region FROM team WHERE nested(employees.age) > 30 OR manager.age = 50")
+            query("SELECT region FROM team WHERE nested(employees.age, 'employees') > 30 OR manager.age = 50")
         );
     }
 
@@ -98,7 +97,7 @@ public class NestedFieldRewriterTest {
     public void noAlias() {
         same(
             query("SELECT region FROM team t, t.employees WHERE employees.age = 26"),
-            query("SELECT region FROM team WHERE nested(employees.age) = 26")
+            query("SELECT region FROM team WHERE nested(employees.age, 'employees') = 26")
         );
     }
 
@@ -123,7 +122,7 @@ public class NestedFieldRewriterTest {
     public void select() {
         same(
             query("SELECT e.age FROM team t, t.employees e"),
-            query("SELECT nested(employees.age) FROM team")
+            query("SELECT nested(employees.age, 'employees' ) FROM team")
         );
     }
 
@@ -131,7 +130,7 @@ public class NestedFieldRewriterTest {
     public void aggregationInSelect() {
         same(
             query("SELECT AVG(e.age) FROM team t, t.employees e"),
-            query("SELECT AVG(nested(employees.age)) FROM team")
+            query("SELECT AVG(nested(employees.age, 'employees')) FROM team")
         );
     }
 
@@ -139,7 +138,7 @@ public class NestedFieldRewriterTest {
     public void multipleAggregationsInSelect() {
         same(
             query("SELECT COUNT(*), AVG(e.age) FROM team t, t.employees e"),
-            query("SELECT COUNT(*), AVG(nested(employees.age)) FROM team")
+            query("SELECT COUNT(*), AVG(nested(employees.age, 'employees')) FROM team")
         );
     }
 
@@ -147,7 +146,7 @@ public class NestedFieldRewriterTest {
     public void groupBy() {
         same(
             query("SELECT e.firstname, COUNT(*) FROM team t, t.employees e GROUP BY e.firstname"),
-            query("SELECT nested(employees.firstname), COUNT(*) FROM team GROUP BY nested(employees.firstname)")
+            query("SELECT nested(employees.firstname, 'employees'), COUNT(*) FROM team GROUP BY nested(employees.firstname, 'employees')")
         );
     }
 
@@ -155,7 +154,7 @@ public class NestedFieldRewriterTest {
     public void multipleFieldsInGroupBy() {
         same(
             query("SELECT COUNT(*) FROM team t, t.employees e GROUP BY t.manager, e.age"),
-            query("SELECT COUNT(*) FROM team GROUP BY manager, nested(employees.age)")
+            query("SELECT COUNT(*) FROM team GROUP BY manager, nested(employees.age, 'employees')")
         );
     }
 
@@ -189,7 +188,8 @@ public class NestedFieldRewriterTest {
     public void multipleFieldsInFrom() {
         same(
             query("SELECT region FROM team/test t, t.manager m, t.employees e WHERE m.age = 30 AND e.age = 26"),
-            query("SELECT region FROM team/test WHERE nested(manager.age) = 30 AND nested(employees.age) = 26")
+            query("SELECT region FROM team/test WHERE nested(manager.age, 'manager') = 30 " +
+                  "AND nested(employees.age, 'employees') = 26")
         );
     }
 
@@ -200,9 +200,9 @@ public class NestedFieldRewriterTest {
             query("SELECT region FROM team t, t.employees e WHERE e.age = 26 " +
                   "UNION ALL " +
                   "SELECT region FROM team t, t.employees e WHERE e.firstname = 'John'"),
-            query("SELECT region FROM team WHERE nested(employees.age) = 26 " +
+            query("SELECT region FROM team WHERE nested(employees.age, 'employees') = 26 " +
                   "UNION ALL " +
-                  "SELECT region FROM team WHERE nested(employees.firstname) = 'John'")
+                  "SELECT region FROM team WHERE nested(employees.firstname, 'employees') = 'John'")
         );
     }
 
@@ -212,9 +212,9 @@ public class NestedFieldRewriterTest {
             query("SELECT region FROM team t, t.employees e WHERE e.age = 26 " +
                   "MINUS " +
                   "SELECT region FROM team t, t.employees e WHERE e.firstname = 'John'"),
-            query("SELECT region FROM team WHERE nested(employees.age) = 26 " +
+            query("SELECT region FROM team WHERE nested(employees.age, 'employees') = 26 " +
                   "MINUS " +
-                  "SELECT region FROM team WHERE nested(employees.firstname) = 'John'")
+                  "SELECT region FROM team WHERE nested(employees.firstname, 'employees') = 'John'")
         );
     }
 
@@ -230,8 +230,8 @@ public class NestedFieldRewriterTest {
                   "  WHERE e.age IN " +
                   "    (SELECT t1.manager.age FROM team t1, t1.employees e1 WHERE e1.age > 0)"),
             query("SELECT region FROM team " +
-                  "  WHERE nested(employees.age) IN " +
-                  "    (SELECT manager.age FROM team WHERE nested(employees.age) > 0)")
+                  "  WHERE nested(employees.age, 'employees') IN " +
+                  "    (SELECT manager.age FROM team WHERE nested(employees.age, 'employees') > 0)")
         );
     }
 
@@ -243,8 +243,294 @@ public class NestedFieldRewriterTest {
                   "  WHERE e.age IN " +
                   "    (SELECT e.age FROM team e, e.manager m WHERE e.age > 0 OR m.name = 'Alice')"),
             query("SELECT name FROM team " +
-                  "  WHERE nested(employees.age) IN " +
-                  "    (SELECT age FROM team WHERE age > 0 OR nested(manager.name) = 'Alice')")
+                  "  WHERE nested(employees.age, 'employees') IN " +
+                  "    (SELECT age FROM team WHERE age > 0 OR nested(manager.name, 'manager') = 'Alice')")
+        );
+    }
+
+    @Test
+    public void isNotNull() {
+        same(
+                query("SELECT e.name " +
+                      "FROM employee as e, e.projects as p " +
+                      "WHERE p IS NOT MISSING"),
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE nested(projects, 'projects') IS NOT MISSING")
+        );
+    }
+
+    @Test
+    public void isNotNullAndCondition() {
+        same(
+                query("SELECT e.name " +
+                      "FROM employee as e, e.projects as p " +
+                      "WHERE p IS NOT MISSING AND p.name LIKE 'security'"),
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE nested('projects', projects IS NOT MISSING AND projects.name LIKE 'security')")
+        );
+    }
+
+    @Test
+    public void multiCondition() {
+        same(
+                query("SELECT e.name FROM employee as e, e.projects as p WHERE p.year = 2016 and p.name LIKE 'security'"),
+                query("SELECT name FROM employee WHERE nested('projects', projects.year = 2016 AND projects.name LIKE 'security')")
+        );
+    }
+
+    @Test
+    public void nestedAndParentCondition() {
+        same(
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE nested(projects, 'projects') IS NOT MISSING AND name LIKE 'security'"),
+                query("SELECT e.name " +
+                      "FROM employee e, e.projects p " +
+                      "WHERE p IS NOT MISSING AND e.name LIKE 'security'")
+        );
+    }
+
+    @Test
+    public void aggWithWhereOnParent() {
+        same(
+                query("SELECT e.name, COUNT(p) as c " +
+                      "FROM employee AS e, e.projects AS p " +
+                      "WHERE e.name like '%smith%' " +
+                      "GROUP BY e.name " +
+                      "HAVING c > 1"),
+                query("SELECT name, COUNT(nested(projects, 'projects')) AS c " +
+                      "FROM employee " +
+                      "WHERE name LIKE '%smith%' " +
+                      "GROUP BY name " +
+                      "HAVING c > 1")
+        );
+
+    }
+
+    @Test
+    public void aggWithWhereOnNested() {
+        same(
+                query("SELECT e.name, COUNT(p) as c " +
+                      "FROM employee AS e, e.projects AS p " +
+                      "WHERE p.name LIKE '%security%' " +
+                      "GROUP BY e.name " +
+                      "HAVING c > 1"),
+                query("SELECT name, COUNT(nested(projects, 'projects')) AS c " +
+                      "FROM employee " +
+                      "WHERE nested(projects.name, 'projects') LIKE '%security%' " +
+                      "GROUP BY name " +
+                      "HAVING c > 1")
+        );
+    }
+
+    @Test
+    public void aggWithWhereOnParentOrNested() {
+        same(
+                query("SELECT e.name, COUNT(p) as c " +
+                      "FROM employee AS e, e.projects AS p " +
+                      "WHERE e.name like '%smith%' or p.name LIKE '%security%' " +
+                      "GROUP BY e.name " +
+                      "HAVING c > 1"),
+                query("SELECT name, COUNT(nested(projects, 'projects')) AS c " +
+                      "FROM employee " +
+                      "WHERE name LIKE '%smith%' OR nested(projects.name, 'projects') LIKE '%security%' " +
+                      "GROUP BY name " +
+                      "HAVING c > 1")
+        );
+    }
+
+    @Test
+    public void aggWithWhereOnParentAndNested() {
+        same(
+                query("SELECT e.name, COUNT(p) as c " +
+                      "FROM employee AS e, e.projects AS p " +
+                      "WHERE e.name like '%smith%' AND p.name LIKE '%security%' " +
+                      "GROUP BY e.name " +
+                      "HAVING c > 1"),
+                query("SELECT name, COUNT(nested(projects, 'projects')) AS c " +
+                      "FROM employee " +
+                      "WHERE name LIKE '%smith%' AND nested(projects.name, 'projects') LIKE '%security%' " +
+                      "GROUP BY name " +
+                      "HAVING c > 1")
+        );
+    }
+
+    @Test
+    public void aggWithWhereOnNestedAndNested() {
+        same(
+                query("SELECT e.name, COUNT(p) as c " +
+                      "FROM employee AS e, e.projects AS p " +
+                      "WHERE p.started_year > 1990 AND p.name LIKE '%security%' " +
+                      "GROUP BY e.name " +
+                      "HAVING c > 1"),
+                query("SELECT name, COUNT(nested(projects, 'projects')) AS c " +
+                      "FROM employee " +
+                      "WHERE nested('projects', projects.started_year > 1990 AND projects.name LIKE '%security%') " +
+                      "GROUP BY name " +
+                      "HAVING c > 1")
+        );
+    }
+
+    @Test
+    public void aggWithWhereOnNestedOrNested() {
+        same(
+                query("SELECT e.name, COUNT(p) as c " +
+                      "FROM employee AS e, e.projects AS p " +
+                      "WHERE p.started_year > 1990 OR p.name LIKE '%security%' " +
+                      "GROUP BY e.name " +
+                      "HAVING c > 1"),
+                query("SELECT name, COUNT(nested(projects, 'projects')) AS c " +
+                      "FROM employee " +
+                      "WHERE nested('projects', projects.started_year > 1990 OR projects.name LIKE '%security%') " +
+                      "GROUP BY name " +
+                      "HAVING c > 1")
+        );
+    }
+
+    @Test
+    public void aggInHavingWithWhereOnParent() {
+        same(
+                query("SELECT e.name " +
+                      "FROM employee AS e, e.projects AS p " +
+                      "WHERE e.name like '%smith%' " +
+                      "GROUP BY e.name " +
+                      "HAVING COUNT(p) > 1"),
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE name LIKE '%smith%' " +
+                      "GROUP BY name " +
+                      "HAVING COUNT(nested(projects, 'projects')) > 1")
+        );
+
+    }
+
+    @Test
+    public void aggInHavingWithWhereOnNested() {
+        same(
+                query("SELECT e.name " +
+                      "FROM employee AS e, e.projects AS p " +
+                      "WHERE p.name LIKE '%security%' " +
+                      "GROUP BY e.name " +
+                      "HAVING COUNT(p) > 1"),
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE nested(projects.name, 'projects') LIKE '%security%' " +
+                      "GROUP BY name " +
+                      "HAVING COUNT(nested(projects, 'projects')) > 1")
+        );
+    }
+
+    @Test
+    public void aggInHavingWithWhereOnParentOrNested() {
+        same(
+                query("SELECT e.name " +
+                      "FROM employee AS e, e.projects AS p " +
+                      "WHERE e.name like '%smith%' or p.name LIKE '%security%' " +
+                      "GROUP BY e.name " +
+                      "HAVING COUNT(p) > 1"),
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE name LIKE '%smith%' OR nested(projects.name, 'projects') LIKE '%security%' " +
+                      "GROUP BY name " +
+                      "HAVING COUNT(nested(projects, 'projects')) > 1")
+        );
+    }
+
+    @Test
+    public void aggInHavingWithWhereOnParentAndNested() {
+        same(
+                query("SELECT e.name " +
+                      "FROM employee AS e, e.projects AS p " +
+                      "WHERE e.name like '%smith%' AND p.name LIKE '%security%' " +
+                      "GROUP BY e.name " +
+                      "HAVING COUNT(p) > 1"),
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE name LIKE '%smith%' AND nested(projects.name, 'projects') LIKE '%security%' " +
+                      "GROUP BY name " +
+                      "HAVING COUNT(nested(projects, 'projects')) > 1")
+        );
+    }
+
+    @Test
+    public void aggInHavingWithWhereOnNestedAndNested() {
+        same(
+                query("SELECT e.name " +
+                      "FROM employee AS e, e.projects AS p " +
+                      "WHERE p.started_year > 1990 AND p.name LIKE '%security%' " +
+                      "GROUP BY e.name " +
+                      "HAVING COUNT(p) > 1"),
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE nested('projects', projects.started_year > 1990 AND projects.name LIKE '%security%') " +
+                      "GROUP BY name " +
+                      "HAVING COUNT(nested(projects, 'projects')) > 1")
+        );
+    }
+
+    @Test
+    public void aggInHavingWithWhereOnNestedOrNested() {
+        same(
+                query("SELECT e.name " +
+                      "FROM employee AS e, e.projects AS p " +
+                      "WHERE p.started_year > 1990 OR p.name LIKE '%security%' " +
+                      "GROUP BY e.name " +
+                      "HAVING COUNT(p) > 1"),
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE nested('projects', projects.started_year > 1990 OR projects.name LIKE '%security%') " +
+                      "GROUP BY name " +
+                      "HAVING COUNT(nested(projects, 'projects')) > 1")
+        );
+    }
+
+    @Test
+    public void notIsNotNull() {
+        same(
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE not (nested(projects, 'projects') IS NOT MISSING)"),
+                query("SELECT e.name " +
+                      "FROM employee as e, e.projects as p " +
+                      "WHERE not (p IS NOT MISSING)")
+        );
+    }
+
+    @Test
+    public void notIsNotNullAndCondition() {
+        same(
+                query("SELECT e.name " +
+                      "FROM employee as e, e.projects as p " +
+                      "WHERE not (p IS NOT MISSING AND p.name LIKE 'security')"),
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE not nested('projects', projects IS NOT MISSING AND projects.name LIKE 'security')")
+        );
+    }
+
+    @Test
+    public void notMultiCondition() {
+        same(
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE not nested('projects', projects.year = 2016 AND projects.name LIKE 'security')"),
+                query("SELECT e.name " +
+                      "FROM employee as e, e.projects as p " +
+                      "WHERE not (p.year = 2016 and p.name LIKE 'security')")
+        );
+    }
+
+    @Test
+    public void notNestedAndParentCondition() {
+        same(
+                query("SELECT name " +
+                      "FROM employee " +
+                      "WHERE (not nested(projects, 'projects') IS NOT MISSING) AND name LIKE 'security'"),
+                query("SELECT e.name " +
+                      "FROM employee e, e.projects p " +
+                      "WHERE not (p IS NOT MISSING) AND e.name LIKE 'security'")
         );
     }
 
@@ -367,20 +653,11 @@ public class NestedFieldRewriterTest {
      * @return     Node parsed out of sql
      */
     private SQLQueryExpr query(String sql) {
-        SQLQueryExpr expr = parse(sql);
+        SQLQueryExpr expr = SqlParserUtils.parse(sql);
         if (sql.contains("nested")) {
             return expr;
         }
         return rewrite(expr);
-    }
-
-    private SQLQueryExpr parse(String sql) {
-        ElasticSqlExprParser parser = new ElasticSqlExprParser(sql);
-        SQLExpr expr = parser.expr();
-        if (parser.getLexer().token() != Token.EOF) {
-            throw new ParserException("Illegal sql: " + sql);
-        }
-        return (SQLQueryExpr) expr;
     }
 
     private SQLQueryExpr rewrite(SQLQueryExpr expr) {

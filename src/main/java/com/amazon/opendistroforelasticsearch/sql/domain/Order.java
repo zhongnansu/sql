@@ -17,19 +17,25 @@ package com.amazon.opendistroforelasticsearch.sql.domain;
 
 /**
  * 排序规则
- * @author ansj
  *
+ * @author ansj
  */
 public class Order {
-	private String nestedPath;
-	private String name;
-	private String type;
+    private String nestedPath;
+    private String name;
+    private String type;
+    private Field sortField;
 
-	public Order(String nestedPath, String name, String type) {
+    public boolean isScript() {
+        return sortField != null && sortField.isScriptField();
+    }
+
+    public Order(String nestedPath, String name, String type, Field sortField) {
         this.nestedPath = nestedPath;
-		this.name = name;
-		this.type = type;
-	}
+        this.name = name;
+        this.type = type;
+        this.sortField = sortField;
+    }
 
     public String getNestedPath() {
         return nestedPath;
@@ -40,19 +46,22 @@ public class Order {
     }
 
     public String getName() {
-		return name;
-	}
+        return name;
+    }
 
-	public void setName(String name) {
-		this.name = name;
-	}
+    public void setName(String name) {
+        this.name = name;
+    }
 
-	public String getType() {
-		return type;
-	}
+    public String getType() {
+        return type;
+    }
 
-	public void setType(String type) {
-		this.type = type;
-	}
+    public void setType(String type) {
+        this.type = type;
+    }
 
+    public Field getSortField() {
+        return sortField;
+    }
 }

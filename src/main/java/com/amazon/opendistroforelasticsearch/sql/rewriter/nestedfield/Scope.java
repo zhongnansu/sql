@@ -22,18 +22,30 @@ import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Set;
 
+import static com.alibaba.druid.sql.ast.statement.SQLJoinTableSource.JoinType;
+
 /**
  * Nested field information in current query being visited.
  */
 class Scope {
 
+    /** Join Type as passed in the actual SQL subquery */
+    private JoinType actualJoinType;
+
     /** Alias of parent such as alias "t" of parent table "team" in "FROM team t, t.employees e" */
+
     private String parentAlias;
 
-    /** Mapping from nested field path alias to path full name in FROM. eg. e in {e => employees} in "FROM t.employees e" */
+    /**
+     * Mapping from nested field path alias to path full name in FROM.
+     * eg. e in {e => employees} in "FROM t.employees e"
+     */
     private Map<String, String> aliasFullPaths = new HashMap<>();
 
-    /** Mapping from binary operation condition (in WHERE) to nested field tag (full path for nested, EMPTY for non-nested field) */
+    /**
+     * Mapping from binary operation condition (in WHERE) to nested
+     * field tag (full path for nested, EMPTY for non-nested field)
+     */
     private Map<SQLBinaryOpExpr, String> conditionTags = new IdentityHashMap<>();
 
     String getParentAlias() {
@@ -72,4 +84,11 @@ class Scope {
         conditionTags.put(expr, tag);
     }
 
+    JoinType getActualJoinType() {
+        return actualJoinType;
+    }
+
+    void setActualJoinType(JoinType joinType) {
+        actualJoinType = joinType;
+    }
 }

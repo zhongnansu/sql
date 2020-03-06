@@ -15,21 +15,12 @@
 
 package com.amazon.opendistroforelasticsearch.sql.parser;
 
-import com.amazon.opendistroforelasticsearch.sql.domain.Condition;
-import com.amazon.opendistroforelasticsearch.sql.domain.KVValue;
-import com.amazon.opendistroforelasticsearch.sql.domain.MethodField;
-import com.amazon.opendistroforelasticsearch.sql.domain.Select;
-import com.amazon.opendistroforelasticsearch.sql.domain.Where;
-import com.amazon.opendistroforelasticsearch.sql.exception.SqlParseException;
-import com.amazon.opendistroforelasticsearch.sql.query.maker.Maker;
-import com.amazon.opendistroforelasticsearch.sql.spatial.SpatialParamsFactory;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
-
 import com.alibaba.druid.sql.ast.SQLExpr;
 import com.alibaba.druid.sql.ast.expr.SQLBetweenExpr;
 import com.alibaba.druid.sql.ast.expr.SQLBinaryOpExpr;
 import com.alibaba.druid.sql.ast.expr.SQLBinaryOperator;
+import com.alibaba.druid.sql.ast.expr.SQLBooleanExpr;
+import com.alibaba.druid.sql.ast.expr.SQLCastExpr;
 import com.alibaba.druid.sql.ast.expr.SQLCharExpr;
 import com.alibaba.druid.sql.ast.expr.SQLIdentifierExpr;
 import com.alibaba.druid.sql.ast.expr.SQLInListExpr;
@@ -44,9 +35,18 @@ import com.alibaba.druid.sql.ast.expr.SQLTextLiteralExpr;
 import com.alibaba.druid.sql.ast.expr.SQLVariantRefExpr;
 import com.alibaba.druid.sql.ast.statement.SQLDeleteStatement;
 import com.alibaba.druid.sql.dialect.mysql.ast.statement.MySqlSelectQueryBlock;
-
+import com.amazon.opendistroforelasticsearch.sql.domain.Condition;
+import com.amazon.opendistroforelasticsearch.sql.domain.KVValue;
+import com.amazon.opendistroforelasticsearch.sql.domain.MethodField;
+import com.amazon.opendistroforelasticsearch.sql.domain.Select;
+import com.amazon.opendistroforelasticsearch.sql.domain.Where;
+import com.amazon.opendistroforelasticsearch.sql.exception.SqlParseException;
+import com.amazon.opendistroforelasticsearch.sql.query.maker.Maker;
+import com.amazon.opendistroforelasticsearch.sql.spatial.SpatialParamsFactory;
 import com.amazon.opendistroforelasticsearch.sql.utils.SQLFunctions;
 import com.amazon.opendistroforelasticsearch.sql.utils.Util;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -57,31 +57,35 @@ import java.util.List;
  * Created by allwefantasy on 9/2/16.
  */
 public class WhereParser {
+    private FieldMaker fieldMaker;
 
     private MySqlSelectQueryBlock query;
     private SQLDeleteStatement delete;
     private SQLExpr where;
     private SqlParser sqlParser;
 
-    public WhereParser(SqlParser sqlParser, MySqlSelectQueryBlock query) {
+    public WhereParser(SqlParser sqlParser, MySqlSelectQueryBlock query, FieldMaker fieldMaker) {
         this.sqlParser = sqlParser;
-        this.query = query;
         this.where = query.getWhere();
+
+        this.query = query;
+        this.fieldMaker = fieldMaker;
     }
 
     public WhereParser(SqlParser sqlParser, SQLDeleteStatement delete) {
-        this.sqlParser = sqlParser;
+        this(sqlParser, delete.getWhere());
+
         this.delete = delete;
-        this.where = delete.getWhere();
     }
 
     public WhereParser(SqlParser sqlParser, SQLExpr expr) {
-        this.sqlParser = sqlParser;
+        this(sqlParser);
         this.where = expr;
     }
 
     public WhereParser(SqlParser sqlParser) {
         this.sqlParser = sqlParser;
+        this.fieldMaker = new FieldMaker();
     }
 
     public Where findWhere() throws SqlParseException {
@@ -95,14 +99,12 @@ public class WhereParser {
     }
 
     public void parseWhere(SQLExpr expr, Where where) throws SqlParseException {
-
-
         if (expr instanceof SQLBinaryOpExpr) {
             SQLBinaryOpExpr bExpr = (SQLBinaryOpExpr) expr;
-            if (explanSpecialCondWithBothSidesAreLiterals(bExpr, where)) {
+            if (explainSpecialCondWithBothSidesAreLiterals(bExpr, where)) {
                 return;
             }
-            if (explanSpecialCondWithBothSidesAreProperty(bExpr, where)) {
+            if (explainSpecialCondWithBothSidesAreProperty(bExpr, where)) {
                 return;
             }
         }
@@ -115,7 +117,7 @@ public class WhereParser {
             parseWhere(((SQLNotExpr) expr).getExpr(), where);
             negateWhere(where);
         } else {
-            explanCond("AND", expr, where);
+            explainCond("AND", expr, where);
         }
     }
 
@@ -132,36 +134,36 @@ public class WhereParser {
     }
 
     //some where conditions eg. 1=1 or 3>2 or 'a'='b'
-    private boolean explanSpecialCondWithBothSidesAreLiterals(SQLBinaryOpExpr bExpr, Where where) throws SqlParseException {
-        if ((bExpr.getLeft() instanceof SQLNumericLiteralExpr || bExpr.getLeft() instanceof SQLCharExpr) &&
-                (bExpr.getRight() instanceof SQLNumericLiteralExpr || bExpr.getRight() instanceof SQLCharExpr)
-                ) {
+    private boolean explainSpecialCondWithBothSidesAreLiterals(SQLBinaryOpExpr bExpr, Where where)
+            throws SqlParseException {
+        if ((bExpr.getLeft() instanceof SQLNumericLiteralExpr || bExpr.getLeft() instanceof SQLCharExpr)
+                && (bExpr.getRight() instanceof SQLNumericLiteralExpr || bExpr.getRight() instanceof SQLCharExpr)
+        ) {
             SQLMethodInvokeExpr sqlMethodInvokeExpr = new SQLMethodInvokeExpr("script", null);
             String operator = bExpr.getOperator().getName();
             if (operator.equals("=")) {
                 operator = "==";
             }
             sqlMethodInvokeExpr.addParameter(
-                    new SQLCharExpr(Util.expr2Object(bExpr.getLeft(), "'") +
-                            " " + operator + " " +
-                            Util.expr2Object(bExpr.getRight(), "'"))
+                    new SQLCharExpr(Util.expr2Object(bExpr.getLeft(), "'")
+                            + " " + operator + " " + Util.expr2Object(bExpr.getRight(), "'"))
             );
 
-            explanCond("AND", sqlMethodInvokeExpr, where);
+            explainCond("AND", sqlMethodInvokeExpr, where);
             return true;
         }
         return false;
     }
 
     //some where conditions eg. field1=field2 or field1>field2
-    private boolean explanSpecialCondWithBothSidesAreProperty(SQLBinaryOpExpr bExpr, Where where) throws SqlParseException {
+    private boolean explainSpecialCondWithBothSidesAreProperty(SQLBinaryOpExpr bExpr, Where where)
+            throws SqlParseException {
         //join is not support
-        if ((bExpr.getLeft() instanceof SQLPropertyExpr || bExpr.getLeft() instanceof SQLIdentifierExpr) &&
-                (bExpr.getRight() instanceof SQLPropertyExpr || bExpr.getRight() instanceof SQLIdentifierExpr) &&
-                Sets.newHashSet("=", "<", ">", ">=", "<=").contains(bExpr.getOperator().getName()) &&
-                !Util.isFromJoinOrUnionTable(bExpr)
-
-                ) {
+        if ((bExpr.getLeft() instanceof SQLPropertyExpr || bExpr.getLeft() instanceof SQLIdentifierExpr)
+                && (bExpr.getRight() instanceof SQLPropertyExpr || bExpr.getRight() instanceof SQLIdentifierExpr)
+                && Sets.newHashSet("=", "<", ">", ">=", "<=").contains(bExpr.getOperator().getName())
+                && !Util.isFromJoinOrUnionTable(bExpr)
+        ) {
             SQLMethodInvokeExpr sqlMethodInvokeExpr = new SQLMethodInvokeExpr("script", null);
             String operator = bExpr.getOperator().getName();
             if (operator.equals("=")) {
@@ -180,12 +182,9 @@ public class WhereParser {
             }
 
             sqlMethodInvokeExpr.addParameter(new SQLCharExpr(
-                    "doc['" + leftProperty + "'].value " +
-                            operator +
-                            " doc['" + rightProperty + "'].value"));
+                    "doc['" + leftProperty + "'].value " + operator + " doc['" + rightProperty + "'].value"));
 
-
-            explanCond("AND", sqlMethodInvokeExpr, where);
+            explainCond("AND", sqlMethodInvokeExpr, where);
             return true;
         }
         return false;
@@ -197,17 +196,17 @@ public class WhereParser {
         if (leftSide instanceof SQLMethodInvokeExpr) {
             return isAllowedMethodOnConditionLeft((SQLMethodInvokeExpr) leftSide, expr.getOperator());
         }
-        return leftSide instanceof SQLIdentifierExpr ||
-                leftSide instanceof SQLPropertyExpr ||
-                leftSide instanceof SQLVariantRefExpr;
+        return leftSide instanceof SQLIdentifierExpr
+                || leftSide instanceof SQLPropertyExpr
+                || leftSide instanceof SQLVariantRefExpr
+                || leftSide instanceof SQLCastExpr;
     }
 
     private boolean isAllowedMethodOnConditionLeft(SQLMethodInvokeExpr method, SQLBinaryOperator operator) {
-        return (method.getMethodName().toLowerCase().equals("nested") ||
-                method.getMethodName().toLowerCase().equals("children") ||
-                SQLFunctions.isBuiltInFunction(method.getMethodName())
-        ) &&
-                !operator.isLogical();
+        return (method.getMethodName().toLowerCase().equals("nested")
+                || method.getMethodName().toLowerCase().equals("children")
+                || SQLFunctions.isFunctionTranslatedToScript(method.getMethodName())
+        ) && !operator.isLogical();
     }
 
 
@@ -227,13 +226,14 @@ public class WhereParser {
             parseWhere(((SQLNotExpr) sub).getExpr(), subWhere);
             negateWhere(subWhere);
         } else {
-            explanCond(bExpr.getOperator().name, sub, where);
+            explainCond(bExpr.getOperator().name, sub, where);
         }
     }
 
-    private void explanCond(String opear, SQLExpr expr, Where where) throws SqlParseException {
+    private void explainCond(String opear, SQLExpr expr, Where where) throws SqlParseException {
         if (expr instanceof SQLBinaryOpExpr) {
             SQLBinaryOpExpr soExpr = (SQLBinaryOpExpr) expr;
+
             boolean methodAsOpear = false;
 
             boolean isNested = false;
@@ -258,18 +258,23 @@ public class WhereParser {
                 if (Condition.OPEAR.methodNameToOpear.containsKey(methodName)) {
                     Object[] methodParametersValue = getMethodValuesWithSubQueries(method);
 
-                    Condition condition = null;
+                    final Condition condition;
                     // fix OPEAR
                     Condition.OPEAR oper = Condition.OPEAR.methodNameToOpear.get(methodName);
-                    if (soExpr.getOperator() == SQLBinaryOperator.LessThanOrGreater || soExpr.getOperator() == SQLBinaryOperator.NotEqual) {
+                    if (soExpr.getOperator() == SQLBinaryOperator.LessThanOrGreater
+                            || soExpr.getOperator() == SQLBinaryOperator.NotEqual) {
                         oper = oper.negative();
                     }
-                    if (isNested)
-                        condition = new Condition(Where.CONN.valueOf(opear), soExpr.getLeft().toString(), soExpr.getLeft(), oper, methodParametersValue, soExpr.getRight(), nestedType);
-                    else if (isChildren)
-                        condition = new Condition(Where.CONN.valueOf(opear), soExpr.getLeft().toString(), soExpr.getLeft(), oper, methodParametersValue, soExpr.getRight(), childrenType);
-                    else
-                        condition = new Condition(Where.CONN.valueOf(opear), soExpr.getLeft().toString(), soExpr.getLeft(), oper, methodParametersValue, soExpr.getRight(), null);
+                    if (isNested) {
+                        condition = new Condition(Where.CONN.valueOf(opear), soExpr.getLeft().toString(),
+                                soExpr.getLeft(), oper, methodParametersValue, soExpr.getRight(), nestedType);
+                    } else if (isChildren) {
+                        condition = new Condition(Where.CONN.valueOf(opear), soExpr.getLeft().toString(),
+                                soExpr.getLeft(), oper, methodParametersValue, soExpr.getRight(), childrenType);
+                    } else {
+                        condition = new Condition(Where.CONN.valueOf(opear), soExpr.getLeft().toString(),
+                                soExpr.getLeft(), oper, methodParametersValue, soExpr.getRight(), null);
+                    }
 
                     where.addWhere(condition);
                     methodAsOpear = true;
@@ -277,22 +282,27 @@ public class WhereParser {
             }
 
             if (!methodAsOpear) {
-                Condition condition = null;
+                final Condition condition;
 
-                if (isNested)
-                    condition = new Condition(Where.CONN.valueOf(opear), soExpr.getLeft().toString(), soExpr.getLeft(), soExpr.getOperator().name, parseValue(soExpr.getRight()), soExpr.getRight(), nestedType);
-                else if (isChildren)
-                    condition = new Condition(Where.CONN.valueOf(opear), soExpr.getLeft().toString(), soExpr.getLeft(), soExpr.getOperator().name, parseValue(soExpr.getRight()), soExpr.getRight(), childrenType);
-                else {
+                if (isNested) {
+                    condition = new Condition(Where.CONN.valueOf(opear), soExpr.getLeft().toString(), soExpr.getLeft(),
+                            soExpr.getOperator().name, parseValue(soExpr.getRight()), soExpr.getRight(), nestedType);
+                } else if (isChildren) {
+                    condition = new Condition(Where.CONN.valueOf(opear), soExpr.getLeft().toString(), soExpr.getLeft(),
+                            soExpr.getOperator().name, parseValue(soExpr.getRight()), soExpr.getRight(), childrenType);
+                } else {
                     SQLMethodInvokeExpr sqlMethodInvokeExpr = parseSQLBinaryOpExprWhoIsConditionInWhere(soExpr);
                     if (sqlMethodInvokeExpr == null) {
-                        condition = new Condition(Where.CONN.valueOf(opear), soExpr.getLeft().toString(), soExpr.getLeft(), soExpr.getOperator().name, parseValue(soExpr.getRight()), soExpr.getRight(), null);
+                        condition = new Condition(Where.CONN.valueOf(opear), soExpr.getLeft().toString(),
+                                soExpr.getLeft(), soExpr.getOperator().name, parseValue(soExpr.getRight()),
+                                soExpr.getRight(), null);
                     } else {
                         ScriptFilter scriptFilter = new ScriptFilter();
                         if (!scriptFilter.tryParseFromMethodExpr(sqlMethodInvokeExpr)) {
                             throw new SqlParseException("could not parse script filter");
                         }
-                        condition = new Condition(Where.CONN.valueOf(opear), null, soExpr.getLeft(), "SCRIPT", scriptFilter, soExpr.getRight());
+                        condition = new Condition(Where.CONN.valueOf(opear), null, soExpr.getLeft(),
+                                "SCRIPT", scriptFilter, soExpr.getRight());
 
                     }
 
@@ -320,14 +330,18 @@ public class WhereParser {
                 isChildren = true;
             }
 
-            Condition condition = null;
+            final Condition condition;
 
-            if (isNested)
-                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, siExpr.isNot() ? "NOT IN" : "IN", parseValue(siExpr.getTargetList()), null, nestedType);
-            else if (isChildren)
-                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, siExpr.isNot() ? "NOT IN" : "IN", parseValue(siExpr.getTargetList()), null, childrenType);
-            else
-                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, siExpr.isNot() ? "NOT IN" : "IN", parseValue(siExpr.getTargetList()), null);
+            if (isNested) {
+                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, siExpr.isNot() ? "NOT IN" : "IN",
+                        parseValue(siExpr.getTargetList()), null, nestedType);
+            } else if (isChildren) {
+                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, siExpr.isNot() ? "NOT IN" : "IN",
+                        parseValue(siExpr.getTargetList()), null, childrenType);
+            } else {
+                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, siExpr.isNot() ? "NOT IN" : "IN",
+                        parseValue(siExpr.getTargetList()), null);
+            }
 
             where.addWhere(condition);
         } else if (expr instanceof SQLBetweenExpr) {
@@ -351,14 +365,21 @@ public class WhereParser {
                 isChildren = true;
             }
 
-            Condition condition = null;
+            final Condition condition;
 
-            if (isNested)
-                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, between.isNot() ? "NOT BETWEEN" : "BETWEEN", new Object[]{parseValue(between.beginExpr), parseValue(between.endExpr)}, null, nestedType);
-            else if (isChildren)
-                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, between.isNot() ? "NOT BETWEEN" : "BETWEEN", new Object[]{parseValue(between.beginExpr), parseValue(between.endExpr)}, null, childrenType);
-            else
-                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, between.isNot() ? "NOT BETWEEN" : "BETWEEN", new Object[]{parseValue(between.beginExpr), parseValue(between.endExpr)}, null, null);
+            if (isNested) {
+                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null,
+                        between.isNot() ? "NOT BETWEEN" : "BETWEEN", new Object[]{parseValue(between.beginExpr),
+                        parseValue(between.endExpr)}, null, nestedType);
+            } else if (isChildren) {
+                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null,
+                        between.isNot() ? "NOT BETWEEN" : "BETWEEN", new Object[]{parseValue(between.beginExpr),
+                        parseValue(between.endExpr)}, null, childrenType);
+            } else {
+                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null,
+                        between.isNot() ? "NOT BETWEEN" : "BETWEEN", new Object[]{parseValue(between.beginExpr),
+                        parseValue(between.endExpr)}, null, null);
+            }
 
             where.addWhere(condition);
         } else if (expr instanceof SQLMethodInvokeExpr) {
@@ -387,16 +408,21 @@ public class WhereParser {
                     isChildren = true;
                 }
 
-                Object spatialParamsObject = SpatialParamsFactory.generateSpatialParamsObject(methodName, methodParameters);
+                Object spatialParamsObject = SpatialParamsFactory.generateSpatialParamsObject(methodName,
+                        methodParameters);
 
-                Condition condition = null;
+                final Condition condition;
 
-                if (isNested)
-                    condition = new Condition(Where.CONN.valueOf(opear), fieldName, null, methodName, spatialParamsObject, null, nestedType);
-                else if (isChildren)
-                    condition = new Condition(Where.CONN.valueOf(opear), fieldName, null, methodName, spatialParamsObject, null, childrenType);
-                else
-                    condition = new Condition(Where.CONN.valueOf(opear), fieldName, null, methodName, spatialParamsObject, null, null);
+                if (isNested) {
+                    condition = new Condition(Where.CONN.valueOf(opear), fieldName, null, methodName,
+                            spatialParamsObject, null, nestedType);
+                } else if (isChildren) {
+                    condition = new Condition(Where.CONN.valueOf(opear), fieldName, null, methodName,
+                            spatialParamsObject, null, childrenType);
+                } else {
+                    condition = new Condition(Where.CONN.valueOf(opear), fieldName, null, methodName,
+                            spatialParamsObject, null, null);
+                }
 
                 where.addWhere(condition);
             } else if (methodName.toLowerCase().equals("nested")) {
@@ -406,7 +432,8 @@ public class WhereParser {
                     throw new SqlParseException("could not fill nested from expr:" + expr);
                 }
 
-                Condition condition = new Condition(Where.CONN.valueOf(opear), nestedType.path, null, methodName.toUpperCase(), nestedType.where, null);
+                Condition condition = new Condition(Where.CONN.valueOf(opear), nestedType.path, null,
+                        methodName.toUpperCase(), nestedType.where, null);
 
                 where.addWhere(condition);
             } else if (methodName.toLowerCase().equals("children")) {
@@ -416,7 +443,8 @@ public class WhereParser {
                     throw new SqlParseException("could not fill children from expr:" + expr);
                 }
 
-                Condition condition = new Condition(Where.CONN.valueOf(opear), childrenType.childType, null, methodName.toUpperCase(), childrenType.where, null);
+                Condition condition = new Condition(Where.CONN.valueOf(opear), childrenType.childType, null,
+                        methodName.toUpperCase(), childrenType.where, null);
 
                 where.addWhere(condition);
             } else if (methodName.toLowerCase().equals("script")) {
@@ -424,7 +452,8 @@ public class WhereParser {
                 if (!scriptFilter.tryParseFromMethodExpr(methodExpr)) {
                     throw new SqlParseException("could not parse script filter");
                 }
-                Condition condition = new Condition(Where.CONN.valueOf(opear), null, null, "SCRIPT", scriptFilter, null);
+                Condition condition = new Condition(Where.CONN.valueOf(opear), null, null, "SCRIPT",
+                        scriptFilter, null);
                 where.addWhere(condition);
             } else if (Maker.isQueryFunction(methodName)) {
                 Condition condition = getConditionForMethod(expr, Where.CONN.valueOf(opear));
@@ -438,8 +467,9 @@ public class WhereParser {
 
             Select innerSelect = sqlParser.parseSelect((MySqlSelectQueryBlock) sqlIn.getSubQuery().getQuery());
 
-            if (innerSelect.getFields() == null || innerSelect.getFields().size() != 1)
+            if (innerSelect.getFields() == null || innerSelect.getFields().size() != 1) {
                 throw new SqlParseException("should only have one return field in subQuery");
+            }
 
             SubQueryExpression subQueryExpression = new SubQueryExpression(innerSelect);
 
@@ -462,14 +492,18 @@ public class WhereParser {
                 isChildren = true;
             }
 
-            Condition condition = null;
+            final Condition condition;
 
-            if (isNested)
-                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, sqlIn.isNot() ? "NOT IN" : "IN", subQueryExpression, null, nestedType);
-            else if (isChildren)
-                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, sqlIn.isNot() ? "NOT IN" : "IN", subQueryExpression, null, childrenType);
-            else
-                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, sqlIn.isNot() ? "NOT IN" : "IN", subQueryExpression, null, null);
+            if (isNested) {
+                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, sqlIn.isNot() ? "NOT IN" : "IN",
+                        subQueryExpression, null, nestedType);
+            } else if (isChildren) {
+                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, sqlIn.isNot() ? "NOT IN" : "IN",
+                        subQueryExpression, null, childrenType);
+            } else {
+                condition = new Condition(Where.CONN.valueOf(opear), leftSide, null, sqlIn.isNot() ? "NOT IN" : "IN",
+                        subQueryExpression, null, null);
+            }
 
             where.addWhere(condition);
         } else {
@@ -477,9 +511,10 @@ public class WhereParser {
         }
     }
 
-    private MethodField parseSQLMethodInvokeExprWithFunctionInWhere(SQLMethodInvokeExpr soExpr) throws SqlParseException {
+    private MethodField parseSQLMethodInvokeExprWithFunctionInWhere(SQLMethodInvokeExpr soExpr)
+            throws SqlParseException {
 
-        MethodField methodField = FieldMaker.makeMethodField(soExpr.getMethodName(),
+        MethodField methodField = fieldMaker.makeMethodField(soExpr.getMethodName(),
                 soExpr.getParameters(),
                 null,
                 null,
@@ -488,35 +523,54 @@ public class WhereParser {
         return methodField;
     }
 
-    private SQLMethodInvokeExpr parseSQLBinaryOpExprWhoIsConditionInWhere(SQLBinaryOpExpr soExpr) throws SqlParseException {
+    private MethodField parseSQLCastExprWithFunctionInWhere(SQLCastExpr soExpr) throws SqlParseException {
+        ArrayList<SQLExpr> parameters = new ArrayList<>();
+        parameters.add(soExpr.getExpr());
+        return fieldMaker.makeMethodField(
+                "CAST",
+                parameters,
+                null,
+                null,
+                query != null ? query.getFrom().getAlias() : null,
+                false
+        );
+    }
 
-        if (!(soExpr.getLeft() instanceof SQLMethodInvokeExpr ||
-                soExpr.getRight() instanceof SQLMethodInvokeExpr)) {
+    private SQLMethodInvokeExpr parseSQLBinaryOpExprWhoIsConditionInWhere(SQLBinaryOpExpr soExpr)
+            throws SqlParseException {
+
+        if (bothSideAreNotFunction(soExpr) && bothSidesAreNotCast(soExpr)) {
             return null;
         }
 
         if (soExpr.getLeft() instanceof SQLMethodInvokeExpr) {
-            if (!SQLFunctions.isBuiltInFunction(((SQLMethodInvokeExpr) soExpr.getLeft()).getMethodName())) {
+            if (!SQLFunctions.isFunctionTranslatedToScript(((SQLMethodInvokeExpr) soExpr.getLeft()).getMethodName())) {
                 return null;
             }
         }
 
         if (soExpr.getRight() instanceof SQLMethodInvokeExpr) {
-            if (!SQLFunctions.isBuiltInFunction(((SQLMethodInvokeExpr) soExpr.getRight()).getMethodName())) {
+            if (!SQLFunctions.isFunctionTranslatedToScript(((SQLMethodInvokeExpr) soExpr.getRight()).getMethodName())) {
                 return null;
             }
         }
 
 
-        MethodField leftMethod = new MethodField(null, Lists.newArrayList(new KVValue("", Util.expr2Object(soExpr.getLeft(), "'"))), null, null);
-        MethodField rightMethod = new MethodField(null, Lists.newArrayList(new KVValue("", Util.expr2Object(soExpr.getRight(), "'"))), null, null);
+        MethodField leftMethod = new MethodField(null, Lists.newArrayList(
+                new KVValue("", Util.expr2Object(soExpr.getLeft(), "'"))), null, null);
+        MethodField rightMethod = new MethodField(null, Lists.newArrayList(
+                new KVValue("", Util.expr2Object(soExpr.getRight(), "'"))), null, null);
 
         if (soExpr.getLeft() instanceof SQLIdentifierExpr || soExpr.getLeft() instanceof SQLPropertyExpr) {
-            leftMethod = new MethodField(null, Lists.newArrayList(new KVValue("", "doc['" + Util.expr2Object(soExpr.getLeft(), "'") + "'].value")), null, null);
+            leftMethod = new MethodField(null, Lists.newArrayList(
+                    new KVValue("", "doc['" + Util.expr2Object(soExpr.getLeft(), "'") + "'].value")),
+                    null, null);
         }
 
         if (soExpr.getRight() instanceof SQLIdentifierExpr || soExpr.getRight() instanceof SQLPropertyExpr) {
-            rightMethod = new MethodField(null, Lists.newArrayList(new KVValue("", "doc['" + Util.expr2Object(soExpr.getRight(), "'") + "'].value")), null, null);
+            rightMethod = new MethodField(null, Lists.newArrayList(
+                    new KVValue("", "doc['" + Util.expr2Object(soExpr.getRight(), "'") + "'].value")),
+                    null, null);
         }
 
         if (soExpr.getLeft() instanceof SQLMethodInvokeExpr) {
@@ -524,6 +578,13 @@ public class WhereParser {
         }
         if (soExpr.getRight() instanceof SQLMethodInvokeExpr) {
             rightMethod = parseSQLMethodInvokeExprWithFunctionInWhere((SQLMethodInvokeExpr) soExpr.getRight());
+        }
+
+        if (soExpr.getLeft() instanceof SQLCastExpr) {
+            leftMethod = parseSQLCastExprWithFunctionInWhere((SQLCastExpr) soExpr.getLeft());
+        }
+        if (soExpr.getRight() instanceof SQLCastExpr) {
+            rightMethod = parseSQLCastExprWithFunctionInWhere((SQLCastExpr) soExpr.getRight());
         }
 
         String v1 = leftMethod.getParams().get(0).value.toString();
@@ -547,11 +608,20 @@ public class WhereParser {
 
     }
 
+    private Boolean bothSideAreNotFunction(SQLBinaryOpExpr soExpr) {
+        return !(soExpr.getLeft() instanceof SQLMethodInvokeExpr || soExpr.getRight() instanceof SQLMethodInvokeExpr);
+    }
+
+    private Boolean bothSidesAreNotCast(SQLBinaryOpExpr soExpr) {
+        return !(soExpr.getLeft() instanceof SQLCastExpr || soExpr.getRight() instanceof SQLCastExpr);
+    }
+
     private Object[] getMethodValuesWithSubQueries(SQLMethodInvokeExpr method) throws SqlParseException {
         List<Object> values = new ArrayList<>();
         for (SQLExpr innerExpr : method.getParameters()) {
             if (innerExpr instanceof SQLQueryExpr) {
-                Select select = sqlParser.parseSelect((MySqlSelectQueryBlock) ((SQLQueryExpr) innerExpr).getSubQuery().getQuery());
+                Select select = sqlParser.parseSelect((MySqlSelectQueryBlock) ((SQLQueryExpr) innerExpr).getSubQuery()
+                        .getQuery());
                 values.add(new SubQueryExpression(select));
             } else if (innerExpr instanceof SQLTextLiteralExpr) {
                 values.add(((SQLTextLiteralExpr) innerExpr).getText());
@@ -574,10 +644,10 @@ public class WhereParser {
     private Object parseValue(SQLExpr expr) throws SqlParseException {
         if (expr instanceof SQLNumericLiteralExpr) {
             Number number = ((SQLNumericLiteralExpr) expr).getNumber();
-            if(number instanceof BigDecimal){
+            if (number instanceof BigDecimal) {
                 return number.doubleValue();
             }
-            if(number instanceof BigInteger){
+            if (number instanceof BigInteger) {
                 return number.longValue();
             }
             return ((SQLNumericLiteralExpr) expr).getNumber();
@@ -591,9 +661,12 @@ public class WhereParser {
             return expr;
         } else if (expr instanceof SQLPropertyExpr) {
             return expr;
+        } else if (expr instanceof SQLBooleanExpr) {
+            return ((SQLBooleanExpr) expr).getValue();
         } else {
             throw new SqlParseException(
-                    String.format("Failed to parse SqlExpression of type %s. expression value: %s", expr.getClass(), expr)
+                    String.format("Failed to parse SqlExpression of type %s. expression value: %s",
+                            expr.getClass(), expr)
             );
         }
     }
