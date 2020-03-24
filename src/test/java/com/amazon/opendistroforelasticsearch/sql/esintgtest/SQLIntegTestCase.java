@@ -26,7 +26,6 @@ import org.junit.Assert;
 import org.junit.Before;
 
 import javax.management.MBeanServerInvocationHandler;
-import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
 import javax.management.remote.JMXConnector;
 import javax.management.remote.JMXConnectorFactory;
@@ -40,27 +39,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Locale;
 
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.createIndexByRestClient;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getAccountIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getBankIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getBankWithNullValuesIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getDateIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getDogIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getDogs2IndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getDogs3IndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getEmployeeNestedTypeIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getGameOfThronesIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getJoinTypeIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getLocationIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getNestedTypeIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getOdbcIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getOrderIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getPeople2IndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getPhraseIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getResponseBody;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.getWeblogsIndexMapping;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.isIndexExist;
-import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.loadDataByRestClient;
+import static com.amazon.opendistroforelasticsearch.sql.esintgtest.TestUtils.*;
 import static com.amazon.opendistroforelasticsearch.sql.plugin.RestSqlAction.EXPLAIN_API_ENDPOINT;
 import static com.amazon.opendistroforelasticsearch.sql.plugin.RestSqlAction.QUERY_API_ENDPOINT;
 
@@ -107,23 +86,25 @@ public abstract class SQLIntegTestCase extends ESRestTestCase {
     }
 
     @AfterClass
-    public static void dumpCoverage() throws IOException, MalformedObjectNameException {
+    public static void dumpCoverage() {
         // jacoco.dir is set in sqlplugin-coverage.gradle, if it doesn't exist we don't
         // want to collect coverage so we can return early
         String jacocoBuildPath = System.getProperty("jacoco.dir");
-        if (jacocoBuildPath.isEmpty()) {
+        if (jacocoBuildPath == null || jacocoBuildPath.isEmpty()) {
             return;
         }
 
         String serverUrl = "service:jmx:rmi:///jndi/rmi://127.0.0.1:7777/jmxrmi";
-        JMXConnector connector = JMXConnectorFactory.connect(new JMXServiceURL(serverUrl));
-        IProxy proxy = MBeanServerInvocationHandler.newProxyInstance(
-                connector.getMBeanServerConnection(), new ObjectName("org.jacoco:type=Runtime"), IProxy.class,
-                false);
+        try(JMXConnector connector = JMXConnectorFactory.connect(new JMXServiceURL(serverUrl))){
+            IProxy proxy = MBeanServerInvocationHandler.newProxyInstance(
+                    connector.getMBeanServerConnection(), new ObjectName("org.jacoco:type=Runtime"), IProxy.class,
+                    false);
 
-        Path path = Paths.get(jacocoBuildPath + "/integTest.exec");
-        Files.write(path, proxy.getExecutionData(false));
-        connector.close();
+            Path path = Paths.get(jacocoBuildPath + "/integTest.exec");
+            Files.write(path, proxy.getExecutionData(false));
+        } catch (Exception ex) {
+            throw new RuntimeException("Failed to dump coverage: " + ex);
+        }
     }
 
     /**
