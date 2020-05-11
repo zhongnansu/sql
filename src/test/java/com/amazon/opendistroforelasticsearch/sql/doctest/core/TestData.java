@@ -42,7 +42,7 @@ public class TestData {
     }
 
     /**
-     * Load test data in file to Elaticsearch cluster via client.
+     * Load test data in file to Elasticsearch cluster via client.
      * @param test  current test instance
      */
     public void loadToES(DocTest test) {
