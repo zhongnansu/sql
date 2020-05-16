@@ -14,3 +14,4 @@
  */
 
 rootProject.name = 'opendistro-sql'
+include 'doctest'

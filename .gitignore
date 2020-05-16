@@ -29,3 +29,7 @@ build/
 
 # git mergetool artifact
 *.orig
+
+# Python
+*/.venv
+*/__pycache__
