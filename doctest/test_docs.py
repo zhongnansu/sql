@@ -1,7 +1,6 @@
 import doctest
 import os
 import zc.customdoctests
-import shutil
 import json
 import re
 import random
@@ -35,6 +34,14 @@ class DocTestConnection(ESConnection):
         click.echo(output)
 
 
+def pretty_print(s):
+    try:
+        d = json.loads(s)
+        print(json.dumps(d, indent=2))
+    except json.decoder.JSONDecodeError:
+        print(s)
+
+
 cmd = DocTestConnection()
 test_data_client = Elasticsearch([ENDPOINT], verify_certs=True)
 
@@ -43,8 +50,18 @@ def cli_transform(s):
     return u'cmd.process({0})'.format(repr(s.strip().rstrip(';')))
 
 
+def bash_transform(s):
+    if s.startswith("odfesql"):
+        s = re.search(r"crash\s+-q\s+\"(.*?)\"", s).group(1)
+        return u'cmd.process({0})'.format(repr(s.strip().rstrip(';')))
+    return (r'pretty_print(sh("""%s""").stdout.decode("utf-8"))' % s) + '\n'
+
+
 cli_parser = zc.customdoctests.DocTestParser(
     ps1='od>', comment_prefix='#', transform=cli_transform)
+
+bash_parser = zc.customdoctests.DocTestParser(
+    ps1=r'sh\$', comment_prefix='#', transform=bash_transform)
 
 
 def set_up_accounts(test):
@@ -56,14 +73,15 @@ def load_file(filename, index_name):
     # todo: using one client under the hood for both uploading test data and set up cli connection?
     #   cmd.client?
     filepath = "./test_data/" + filename
-
     # generate iterable data
     def load_json():
         with open(filepath, "r") as f:
             for line in f:
                 yield json.loads(line)
 
-    helpers.bulk(test_data_client, load_json(), stats_only=True, index=index_name)
+    # Need to enable refresh, because the load won't be visible to search immediately
+    # https://stackoverflow.com/questions/57840161/elasticsearch-python-bulk-helper-api-with-refresh
+    helpers.bulk(test_data_client, load_json(), stats_only=True, index=index_name, refresh='wait_for')
 
 
 def set_up(test):
@@ -97,6 +115,25 @@ class DocTests(unittest.TestSuite):
 
 def load_tests(loader, suite, ignore):
     tests = []
+    for fn in doctest_files('dql/explain.rst'):
+        tests.append(
+            docsuite(
+                fn,
+                parser=bash_parser,
+                setUp=set_up_accounts,
+                globs={
+                    'sh': partial(
+                        subprocess.run,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        timeout=60,
+                        shell=True
+                    ),
+                    'pretty_print': pretty_print
+                }
+            )
+        )
 
     for fn in doctest_files('dql/basics.rst'): # todo: add more rst to test shuffle
         tests.append(docsuite(fn, setUp=set_up_accounts))
