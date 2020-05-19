@@ -12,7 +12,7 @@ from functools import partial
 from odfe_sql_cli.esconnection import ESConnection
 from odfe_sql_cli.utils import OutputSettings
 from odfe_sql_cli.formatter import Formatter
-from elasticsearch import Elasticsearch, helpers, ConnectionPool
+from elasticsearch import Elasticsearch, helpers
 
 ENDPOINT = "http://localhost:9200"
 
@@ -135,7 +135,7 @@ def load_tests(loader, suite, ignore):
             )
         )
 
-    for fn in doctest_files('dql/basics.rst'): # todo: add more rst to test shuffle
+    for fn in doctest_files('dql/basics.rst'):  # todo: add more rst to test shuffle
         tests.append(docsuite(fn, setUp=set_up_accounts))
 
     # randomize order of tests to make sure they don't depend on each other
