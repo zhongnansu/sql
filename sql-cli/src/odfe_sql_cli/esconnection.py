@@ -17,12 +17,16 @@ import click
 import logging
 import ssl
 import sys
+
+import requests
 import urllib3
 
 from elasticsearch import Elasticsearch, RequestsHttpConnection
 from elasticsearch.exceptions import ConnectionError, RequestError
 from elasticsearch.connection import create_ssl_context
 from requests_aws4auth import AWS4Auth
+
+from odfe_sql_cli.http_client.http_client import OpenSearch
 
 
 class ESConnection:
@@ -96,7 +100,7 @@ class ESConnection:
         return any(x in self.plugins for x in sql_plugin_name_list)
 
     def set_connection(self, is_reconnect=False):
-        urllib3.disable_warnings()
+        requests.packages.urllib3.disable_warnings()
         logging.captureWarnings(True)
 
         if self.http_auth:
@@ -105,24 +109,24 @@ class ESConnection:
         elif self.use_aws_authentication:
             es_client = self.get_aes_client()
         else:
-            es_client = Elasticsearch([self.endpoint], verify_certs=True)
+            es_client = OpenSearch([self.endpoint], verify_certs=True)
 
         # check connection. check Open Distro Elasticsearch SQL plugin availability.
         try:
-            if not self.is_sql_plugin_installed(es_client):
-                click.secho(
-                    message="Must have Open Distro SQL plugin installed in your Elasticsearch "
-                    "instance!\nCheck this out: https://github.com/opendistro-for-elasticsearch/sql",
-                    fg="red",
-                )
-                click.echo(self.plugins)
-                sys.exit()
+            # if not self.is_sql_plugin_installed(es_client):
+            #     click.secho(
+            #         message="Must have Open Distro SQL plugin installed in your Elasticsearch "
+            #         "instance!\nCheck this out: https://github.com/opendistro-for-elasticsearch/sql",
+            #         fg="red",
+            #     )
+            #     click.echo(self.plugins)
+            #     sys.exit()
 
             # info() may throw ConnectionError, if connection fails to establish
-            info = es_client.info()
-            self.es_version = info["version"]["number"]
+            # info = es_client.info()
+            # self.es_version = info["version"]["number"]
             self.client = es_client
-            self.get_indices()
+            # self.get_indices()
 
         except ConnectionError as error:
             if is_reconnect:
@@ -161,7 +165,7 @@ class ESConnection:
 
         try:
             if self.query_language == "sql":
-                data = self.client.transport.perform_request(
+                data = self.client.perform_request(
                     url="/_opendistro/_sql/_explain" if explain else "/_opendistro/_sql/",
                     method="POST",
                     params=None if explain else {"format": output_format},
